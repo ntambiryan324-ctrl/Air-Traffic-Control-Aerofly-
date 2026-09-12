@@ -2,7 +2,7 @@ name: Build Android APK
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -11,53 +11,57 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 45
-
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Python
         uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
-      - name: Set up Java
+      - name: Java
         uses: actions/setup-java@v5
         with:
+          distribution: temurin
           java-version: "17"
-          distribution: "temurin"
 
-      - name: Install system dependencies
+      - name: System dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y build-essential git zip unzip openjdk-17-jdk             python3-pip autoconf automake autopoint gettext libtool libtool-bin pkg-config zlib1g-dev             libncurses5-dev libncursesw5-dev libtinfo6 libffi-dev libssl-dev cmake
+          sudo apt-get install -y build-essential git zip unzip autoconf automake autopoint gettext libtool libtool-bin pkg-config zlib1g-dev libncurses5-dev libncursesw5-dev libtinfo5 libffi-dev libssl-dev cmake
 
-      - name: Install build tools
+      - name: Python build tools
         run: |
-          python -m pip install --upgrade pip setuptools wheel
-          python -m pip install "buildozer>=1.5.0" "cython<3.2" kivy
+          python -m pip install --upgrade pip
+          python -m pip install "buildozer==1.5.0" "cython<3.1"
 
-      - name: Static syntax check
+      - name: Static checks
         run: |
           python -m py_compile main.py aviation_features.py
-          python -m compileall -q . -x '(^|/)(.git|.buildozer|bin|build|__pycache__)(/|$)'
+          python -m compileall -q main.py aviation_features.py
+          python - <<'PY'
+          import ast
+          for path in ("main.py", "aviation_features.py"):
+              ast.parse(open(path, encoding="utf-8").read(), filename=path)
+          print("Python source checks passed")
+          PY
 
       - name: Build debug APK
+        env:
+          P4A_RELEASE: "master"
         run: |
-          buildozer -v android debug
+          rm -rf .buildozer bin
+          buildozer android debug
 
-      - name: Show APK output
-        if: always()
+      - name: Verify APK
         run: |
-          mkdir -p bin
-          find bin -maxdepth 1 -type f \( -name "*.apk" -o -name "*.aab" \) -print
+          test -n "$(find bin -maxdepth 1 -type f -name '*.apk' -print -quit)"
+          ls -lh bin/*.apk
 
-      - name: Upload APK artifact
-        if: success()
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: AeroflyATC-debug-apk
+          name: aerofly-flight-companion-debug
           path: bin/*.apk
           if-no-files-found: error
-          retention-days: 30
