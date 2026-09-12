@@ -573,12 +573,47 @@ class CommsScreen(BoxLayout):
             hint_text="Type pilot transmission...",
             multiline=False,
         )
-        send_btn = Button(text="Transmit", size_hint_x=0.28)
+        mic_btn = Button(text="MIC / STT", size_hint_x=0.24)
+        mic_btn.bind(on_press=self.start_stt)
+        send_btn = Button(text="Transmit", size_hint_x=0.25)
         send_btn.bind(on_press=self.send_transmission)
         input_box.add_widget(self.pilot_input)
+        input_box.add_widget(mic_btn)
         input_box.add_widget(send_btn)
         self.add_widget(input_box)
+        self.tts_enabled = True
+        tts_btn = Button(text="ATC TTS: ON", size_hint_y=None, height=42)
+        tts_btn.bind(on_press=lambda *_: self.toggle_tts(tts_btn))
+        self.add_widget(tts_btn)
 
+    def toggle_tts(self, button):
+        self.tts_enabled = not self.tts_enabled
+        button.text = "ATC TTS: ON" if self.tts_enabled else "ATC TTS: OFF"
+
+    def start_stt(self, _):
+        try:
+            from android import activity
+            from jnius import autoclass, cast
+            PythonActivity = autoclass("org.kivy.android.PythonActivity")
+            Intent = autoclass("android.content.Intent")
+            RecognizerIntent = autoclass("android.speech.RecognizerIntent")
+            Activity = autoclass("android.app.Activity")
+            request_code = 48321
+            def result_callback(code, result_code, intent):
+                if code != request_code: return
+                try: activity.unbind(on_activity_result=result_callback)
+                except Exception: pass
+                if result_code == Activity.RESULT_OK and intent:
+                    results = intent.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
+                    if results and results.size() > 0: self.pilot_input.text = str(results.get(0))
+            activity.bind(on_activity_result=result_callback)
+            current = cast("android.app.Activity", PythonActivity.mActivity)
+            intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+            intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            intent.putExtra(RecognizerIntent.EXTRA_PROMPT, "Speak pilot transmission")
+            current.startActivityForResult(intent, request_code)
+        except Exception as exc:
+            self.atc_log.text += "STT unavailable: " + str(exc) + "\n\n"
     def set_phrase(self, phrase):
         self.pilot_input.text = phrase
         self.pilot_input.focus = True
@@ -611,6 +646,8 @@ class CommsScreen(BoxLayout):
         if marker in self.atc_log.text:
             self.atc_log.text = self.atc_log.text.replace(marker, "", 1)
         self.atc_log.text += f"ATC: {response}\n\n"
+        if getattr(self, "tts_enabled", True):
+            threading.Thread(target=speak_atc, args=(response,), daemon=True).start()
 
 
 class ScratchpadScreen(BoxLayout):
@@ -663,6 +700,8 @@ class AeroflyATCApp(App):
         self.title = f"AeroflyATC {APP_VERSION}"
         self.receiver = TelemetryReceiver()
         self.receiver.start()
+        self.aerofly = AeroflyTCPConnector(self.receiver)
+        self.aerofly.start("127.0.0.1")
 
         panel = TabbedPanel(do_default_tab=False)
 
@@ -671,6 +710,25 @@ class AeroflyATCApp(App):
         flight_tab.add_widget(self.flight_screen)
         panel.add_widget(flight_tab)
 
+        map_tab = TabbedPanelItem(text="Map")
+        self.map_screen = MovingMapScreen(self.receiver)
+        map_tab.add_widget(self.map_screen)
+        panel.add_widget(map_tab)
+
+        connect_tab = TabbedPanelItem(text="Connect")
+        connect_box = BoxLayout(orientation="vertical", padding=12, spacing=8)
+        connect_box.add_widget(Label(text="Enable Aerofly Settings > Miscellaneous > Send flight data to FSWidgets Apps.", size_hint_y=None, height=55))
+        ip_row = BoxLayout(size_hint_y=None, height=50, spacing=6)
+        ip_row.add_widget(Label(text="Simulator IPv4:", size_hint_x=0.35))
+        self.sim_ip = TextInput(text="127.0.0.1", multiline=False)
+        ip_row.add_widget(self.sim_ip)
+        connect_box.add_widget(ip_row)
+        cb = Button(text="CONNECT TO TCP 58585", size_hint_y=None, height=55)
+        cb.bind(on_press=lambda *_: self.aerofly.reconnect(self.sim_ip.text))
+        connect_box.add_widget(cb)
+        connect_box.add_widget(Label(text="Same-device default: 127.0.0.1. Remote device: enter its LAN IPv4 address. UDP 49002 is also accepted.", size_hint_y=None, height=65))
+        connect_tab.add_widget(connect_box)
+        panel.add_widget(connect_tab)
         comms_tab = TabbedPanelItem(text="Comms")
         comms_tab.add_widget(CommsScreen(self.receiver))
         panel.add_widget(comms_tab)
@@ -683,12 +741,16 @@ class AeroflyATCApp(App):
         return panel
 
     def update_ui(self, _dt):
-        self.flight_screen.update(self.receiver.snapshot())
+        data = self.receiver.snapshot()
+        self.flight_screen.update(data)
+        if hasattr(self, "map_screen"):
+            self.map_screen.update(data)
 
     def on_pause(self):
         return True
 
     def on_stop(self):
+        self.aerofly.stop()
         self.receiver.stop()
 
 
