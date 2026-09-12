@@ -783,10 +783,11 @@ class MyFlightScreen(BoxLayout):
 
 
 class CommsScreen(BoxLayout):
-    def __init__(self, telemetry_receiver, cabin_callback=None, **kwargs):
+    def __init__(self, telemetry_receiver, cabin_callback=None, copilot=None, **kwargs):
         super().__init__(orientation="vertical", padding=12, spacing=8, **kwargs)
         self.telemetry_receiver = telemetry_receiver
         self.cabin_callback = cabin_callback
+        self.copilot = copilot
 
         self.add_widget(Label(text="ATC Communications", size_hint_y=None, height=32, font_size="18sp"))
 
@@ -832,10 +833,21 @@ class CommsScreen(BoxLayout):
         tts_btn = Button(text="ATC TTS: ON", size_hint_y=None, height=42)
         tts_btn.bind(on_press=lambda *_: self.toggle_tts(tts_btn))
         self.add_widget(tts_btn)
+        copilot_btn = Button(text="COPILOT AFK COMMS: OFF", size_hint_y=None, height=42)
+        copilot_btn.bind(on_press=lambda *_: self.toggle_copilot(copilot_btn))
+        self.add_widget(copilot_btn)
 
     def toggle_tts(self, button):
         self.tts_enabled = not self.tts_enabled
         button.text = "ATC TTS: ON" if self.tts_enabled else "ATC TTS: OFF"
+
+    def toggle_copilot(self, button):
+        if self.copilot:
+            self.copilot.set_afk(not self.copilot.afk_mode)
+            button.text = "COPILOT AFK COMMS: ON" if self.copilot.afk_mode else "COPILOT AFK COMMS: OFF"
+
+    def append_conversation(self, speaker, message):
+        self.atc_log.text += "%s: %s\n\n" % (speaker, message)
 
     def start_stt(self, _):
         try:
@@ -899,6 +911,52 @@ class CommsScreen(BoxLayout):
         self.atc_log.text += f"ATC: {response}\n\n"
         if getattr(self, "tts_enabled", True):
             threading.Thread(target=speak_atc, args=(response,), daemon=True).start()
+        if self.copilot and self.copilot.afk_mode:
+            self.copilot.handle_atc(response, self.telemetry_receiver.snapshot())
+
+
+class Copilot:
+    """Local first officer that can handle simulated ATC while the pilot is AFK."""
+    def __init__(self, app):
+        self.app = app
+        self.afk_mode = False
+        self.last_action = ""
+        self.last_phase = None
+
+    def set_afk(self, enabled):
+        self.afk_mode = bool(enabled)
+        self.app.comms_log_message("COPILOT", "AFK COMMS " + ("ENABLED" if enabled else "DISABLED"))
+
+    def handle_atc(self, message, data):
+        lower = str(message).lower()
+        callsign = data.get("callsign") or self.app.atc_controller.callsign or "aircraft"
+        if "go around" in lower:
+            reply = "%s, going around." % callsign
+        elif "cleared for takeoff" in lower:
+            reply = "%s, cleared for takeoff." % callsign
+        elif "contact " in lower:
+            reply = "%s, switching." % callsign
+        elif any(x in lower for x in ("maintain", "climb", "descend", "heading")):
+            reply = "%s, wilco." % callsign
+        else:
+            reply = "%s, copied." % callsign
+        self.app.comms_log_message("COPILOT", reply)
+        country = None
+        nearest = self.app.navdata.nearest(data.get("lat", 0), data.get("lon", 0))
+        if nearest:
+            country = nearest.get("iso_country")
+        threading.Thread(target=speak_atc, args=(reply, region_voice_locale(data.get("lat"), data.get("lon"), country)), daemon=True).start()
+
+    def update(self, data, atc_message=""):
+        if not self.afk_mode:
+            return
+        phase = data.get("phase")
+        if phase != self.last_phase:
+            self.last_phase = phase
+            self.app.comms_log_message("COPILOT", "Flight phase changed to %s." % phase)
+        if atc_message and atc_message != self.last_action:
+            self.last_action = atc_message
+            self.handle_atc(atc_message, data)
 
 
 class ScratchpadScreen(BoxLayout):
@@ -963,6 +1021,7 @@ class AeroflyATCApp(App):
         self.airspace.load()
         self.elevation = SRTMElevation(self.user_data_dir)
         self.cabin = CabinCrewEngine()
+        self.copilot = Copilot(self)
         self.map_tiles = OSMTileCache(self.user_data_dir)
         self.navdata = AirportData(self.user_data_dir)
         self.navdata.load_local()
@@ -1033,7 +1092,8 @@ class AeroflyATCApp(App):
         panel.add_widget(ops_tab)
 
         comms_tab = TabbedPanelItem(text="Comms")
-        comms_tab.add_widget(CommsScreen(self.receiver, self.call_cabin_crew))
+        self.comms_screen = CommsScreen(self.receiver, self.call_cabin_crew, self.copilot)
+        comms_tab.add_widget(self.comms_screen)
         panel.add_widget(comms_tab)
 
         scratch_tab = TabbedPanelItem(text="Scratchpad")
@@ -1047,7 +1107,10 @@ class AeroflyATCApp(App):
         data = self.flight_state.update(self.receiver.snapshot())
         self.flight_screen.update(data)
         self.route_tracker.add(data.get("lat", 0), data.get("lon", 0), data.get("callsign"))
-        nearest = self.navdata.nearest(data.get("lat", 0), data.get("lon", 0)) or self.airports.nearest(data.get("lat", 0), data.get("lon", 0))
+        nearest_record = self.navdata.nearest(data.get("lat", 0), data.get("lon", 0))
+        nearest = self.airports.nearest(data.get("lat", 0), data.get("lon", 0))
+        if nearest_record:
+            nearest = (nearest_record.get("ident") or nearest_record.get("gps_code") or nearest_record.get("iata_code") or "NEAR", nearest_record)
         if data.get("connected"):
             terrain_ft = self.elevation.elevation_ft(data.get("lat", 0), data.get("lon", 0))
             active_airspace = self.airspace.active_at(data.get("lat", 0), data.get("lon", 0), data.get("altitude", 0))
@@ -1079,6 +1142,10 @@ class AeroflyATCApp(App):
     def on_pause(self):
         return True
 
+
+    def comms_log_message(self, speaker, message):
+        if hasattr(self, "comms_screen"):
+            self.comms_screen.append_conversation(speaker, message)
 
     def load_airspace(self):
         count = self.airspace.load()
