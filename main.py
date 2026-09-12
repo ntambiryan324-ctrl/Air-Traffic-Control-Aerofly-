@@ -1047,7 +1047,7 @@ class AeroflyATCApp(App):
         data = self.flight_state.update(self.receiver.snapshot())
         self.flight_screen.update(data)
         self.route_tracker.add(data.get("lat", 0), data.get("lon", 0), data.get("callsign"))
-        nearest = self.airports.nearest(data.get("lat", 0), data.get("lon", 0))
+        nearest = self.navdata.nearest(data.get("lat", 0), data.get("lon", 0)) or self.airports.nearest(data.get("lat", 0), data.get("lon", 0))
         if data.get("connected"):
             terrain_ft = self.elevation.elevation_ft(data.get("lat", 0), data.get("lon", 0))
             active_airspace = self.airspace.active_at(data.get("lat", 0), data.get("lon", 0), data.get("altitude", 0))
