@@ -168,6 +168,7 @@ class CabinCrewEngine:
         "DEPARTURE": "Cabin crew, we are climbing. You may begin your cabin service when safe.",
         "CENTER": "Ladies and gentlemen, we are now in cruise. Cabin service will begin shortly.",
         "APPROACH": "Cabin crew, prepare the cabin for arrival. Please ensure all passengers are seated and secured.",
+        "LANDING": "Ladies and gentlemen, we have landed. Please remain seated with your seat belt fastened until the aircraft is parked.",
     }
 
     def __init__(self):
