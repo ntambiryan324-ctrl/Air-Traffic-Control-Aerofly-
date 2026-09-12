@@ -38,3 +38,24 @@ For Aerofly FS Global and AeroflyATC on the same Android tablet, use 127.0.0.1. 
 ## Voice and moving map
 
 The Comms tab now provides Android speech recognition for pilot transmissions and Android Text-to-Speech for ATC replies. The Map tab displays the aircraft position, heading and recent track in a lightweight moving/radar display.
+
+
+## Aviation data and simulation features
+
+Version 1.3 adds:
+- On-demand OpenStreetMap base-map tiles with local caching and visible attribution.
+- Optional worldwide airport database updates from OurAirports.
+- Local SRTM HGT terrain elevation lookup.
+- OpenAir v1/v2 airspace import and live point-in-airspace awareness.
+- Phase-driven cabin announcements and cabin-crew interphone replies.
+- Country-aware TTS locale selection with geographic fallback.
+- Landing-stage detection and cabin arrival announcement.
+- CI syntax checking for both Python modules.
+
+Map tiles are fetched only for the tile currently being viewed; the app does not bulk-prefetch OSM tiles. OpenAir and terrain data remain user-supplied/local data so the APK does not embed stale worldwide aeronautical data.
+
+Sources:
+- OpenStreetMap: https://www.openstreetmap.org/
+- OurAirports: https://ourairports.com/data/
+- USGS/NASA SRTM: https://www.usgs.gov/centers/eros/science/usgs-eros-archive-digital-elevation-shuttle-radar-topography-mission-srtm-1
+- OpenAir format reference: https://github.com/openAIP/openaip-openair-parser
