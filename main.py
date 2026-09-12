@@ -373,6 +373,7 @@ class ATCController:
         self.frequency = "121.500"
         self.controller = "GROUND"
         self.last_instruction = ""
+        self.last_emit = 0.0
         self.history = []
 
     def identify(self, data):
@@ -406,7 +407,10 @@ class ATCController:
         else:
             msg = ""
         if msg:
+            if msg == self.last_instruction and time.time() - self.last_emit < 15:
+                return ""
             self.last_instruction = msg
+            self.last_emit = time.time()
             self.history.append({"time": time.time(), "controller": self.controller, "frequency": self.frequency, "message": msg})
             self.history = self.history[-100:]
         return msg
@@ -1052,8 +1056,6 @@ class AeroflyATCApp(App):
         traffic = self.traffic_engine.update(data)
         terrain_alerts = self.terrain.check(data, nearest)
         if terrain_alerts and hasattr(self, "ops_status"): self.ops_status.text += "\\nWARNING: " + " | ".join(terrain_alerts)
-        alerts = self.traffic_engine.conflict(data, traffic)
-        if alerts and hasattr(self, "ops_status"): self.ops_status.text += "\\nTRAFFIC: " + " | ".join(alerts)
         announcement = self.cabin.update(data.get("phase"))
         if announcement:
             speak_atc(announcement, region_voice_locale(data.get("lat"), data.get("lon")))
