@@ -16,6 +16,7 @@ from kivy.uix.gridlayout import GridLayout
 from kivy.uix.label import Label
 from kivy.uix.tabbedpanel import TabbedPanel, TabbedPanelItem
 from kivy.uix.textinput import TextInput
+from kivy.graphics import Color, Line, Triangle
 
 
 APP_VERSION = "1.1.0"
@@ -426,6 +427,71 @@ def offline_atc_response(text, telemetry):
         return f"{callsign}, frequency request received. State the airport or controlling facility."
     return f"{callsign}, transmission received. Simulated ATC is in offline mode; provide airport, position, altitude, and request."
 
+
+
+def speak_atc(text):
+    try:
+        from jnius import autoclass
+        Activity = autoclass("org.kivy.android.PythonActivity")
+        TTS = autoclass("android.speech.tts.TextToSpeech")
+        Locale = autoclass("java.util.Locale")
+        tts = TTS(Activity.mActivity, None)
+        tts.setLanguage(Locale.US)
+        tts.speak(str(text), TTS.QUEUE_FLUSH, None, "atc")
+    except Exception as exc:
+        print("TTS unavailable:", exc)
+
+class MovingMapScreen(BoxLayout):
+    def __init__(self, receiver, **kwargs):
+        super().__init__(orientation="vertical", padding=6, spacing=4, **kwargs)
+        self.receiver = receiver
+        self.trail = []
+        self.add_widget(Label(text="LIVE MOVING MAP / RADAR", size_hint_y=None, height=32))
+        self.status = Label(text="Waiting for Aerofly telemetry...", size_hint_y=None, height=28)
+        self.add_widget(self.status)
+        self.map_box = BoxLayout()
+        self.add_widget(self.map_box)
+        with self.map_box.canvas:
+            Color(0.06, 0.07, 0.09, 1)
+            self.grid = [Line(points=[0,0,0,0], width=1) for _ in range(13)]
+            Color(0.95, 0.72, 0.08, 1)
+            self.plane = Triangle(points=[0,0,0,0,0,0])
+            Color(0.15, 0.75, 1, 1)
+            self.track = Line(points=[], width=2)
+        self.map_box.bind(size=lambda *_: self.redraw())
+        self.map_box.bind(pos=lambda *_: self.redraw())
+
+    def update(self, data):
+        if data["lat"] or data["lon"]:
+            p = (data["lat"], data["lon"])
+            if not self.trail or p != self.trail[-1]: self.trail.append(p)
+            self.trail = self.trail[-400:]
+        if data["connected"]:
+            self.status.text = "CONNECTED  %.5f, %.5f | %.0f ft | %.0f kt | %03.0f°" % (data["lat"], data["lon"], data["altitude"], data["speed"], data["heading"])
+        else:
+            self.status.text = "Waiting for Aerofly — enable Send flight data to FSWidgets Apps"
+        self.redraw()
+
+    def redraw(self):
+        w, h = self.map_box.size
+        cx, cy = self.map_box.x + w/2, self.map_box.y + h/2
+        step = max(35, min(w,h)/7)
+        for i, line in enumerate(self.grid):
+            x = cx + (i-6)*step
+            line.points = [x, self.map_box.y, x, self.map_box.y+h]
+        data = self.receiver.snapshot()
+        pts=[]
+        scale=6000.0
+        for lat, lon in self.trail:
+            dx=(lon-data["lon"])*111320*math.cos(math.radians(data["lat"]))
+            dy=(lat-data["lat"])*110540
+            pts += [cx+dx/scale, cy+dy/scale]
+        self.track.points=pts
+        hdg=math.radians(data["heading"])
+        fx,fy=cx+math.sin(hdg)*24,cy+math.cos(hdg)*24
+        lx,ly=cx+math.sin(hdg+2.4)*9,cy+math.cos(hdg+2.4)*9
+        rx,ry=cx+math.sin(hdg-2.4)*9,cy+math.cos(hdg-2.4)*9
+        self.plane.points=[fx,fy,lx,ly,rx,ry]
 
 class MyFlightScreen(BoxLayout):
     def __init__(self, **kwargs):
