@@ -25,8 +25,20 @@ REGION_VOICE_PROFILES = (
 )
 
 
-def region_voice_locale(lat, lon):
-    """Select a TTS locale from a coarse geographic region, with GB English fallback."""
+def region_voice_locale(lat, lon, country=None):
+    """Select an available TTS locale from country first, then a coarse region."""
+    country_map = {
+        "US": "en-US", "CA": "en-CA", "GB": "en-GB", "IE": "en-IE",
+        "AU": "en-AU", "NZ": "en-NZ", "IN": "en-IN", "ZA": "en-ZA",
+        "UG": "en-GB", "KE": "en-GB", "TZ": "en-GB", "NG": "en-GB",
+        "FR": "fr-FR", "BE": "fr-FR", "DE": "de-DE", "AT": "de-DE",
+        "ES": "es-ES", "PT": "pt-PT", "BR": "pt-BR", "IT": "it-IT",
+        "NL": "nl-NL", "CH": "de-CH", "SE": "sv-SE", "NO": "nb-NO",
+        "DK": "da-DK", "FI": "fi-FI", "PL": "pl-PL", "TR": "tr-TR",
+        "AE": "en-GB", "SA": "en-GB", "EG": "en-GB",
+    }
+    if country and str(country).upper() in country_map:
+        return country_map[str(country).upper()]
     lat, lon = float(lat or 0), float(lon or 0)
     for a, b, c, d, locale in REGION_VOICE_PROFILES:
         if a <= lat <= b and c <= lon <= d:
