@@ -388,6 +388,8 @@ class ATCController:
             "DEPARTURE": "DEPARTURE",
             "CENTER": "CENTER",
             "APPROACH": "APPROACH",
+            "LANDING": "TOWER",
+            "NO TELEMETRY": "GROUND",
         }.get(phase, "GROUND")
 
     def generate(self, data):
@@ -432,13 +434,17 @@ class FlightStateEngine:
         alt = float(d.get("altitude", 0) or 0)
         on_ground = bool(d.get("on_ground", False))
         old = self.phase
-        if on_ground and speed < 35:
+        if not d.get("connected", False):
+            self.phase = "NO TELEMETRY"
+        elif on_ground and speed < 35:
             self.phase = "GROUND"
         elif on_ground and speed >= 35:
             self.phase = "TAKEOFF"
-        elif not on_ground and vs > 300:
+        elif prev and not prev.get("on_ground", False) and on_ground and speed < 80:
+            self.phase = "LANDING"
+        elif not on_ground and vs > 300 and alt < 12000:
             self.phase = "DEPARTURE"
-        elif not on_ground and vs < -300:
+        elif not on_ground and vs < -300 and alt < 12000:
             self.phase = "APPROACH"
         elif not on_ground:
             self.phase = "CENTER"
@@ -773,9 +779,10 @@ class MyFlightScreen(BoxLayout):
 
 
 class CommsScreen(BoxLayout):
-    def __init__(self, telemetry_receiver, **kwargs):
+    def __init__(self, telemetry_receiver, cabin_callback=None, **kwargs):
         super().__init__(orientation="vertical", padding=12, spacing=8, **kwargs)
         self.telemetry_receiver = telemetry_receiver
+        self.cabin_callback = cabin_callback
 
         self.add_widget(Label(text="ATC Communications", size_hint_y=None, height=32, font_size="18sp"))
 
@@ -794,6 +801,7 @@ class CommsScreen(BoxLayout):
             ("Taxi", "Request taxi clearance"),
             ("Departure", "Request departure clearance"),
             ("Approach", "Request approach clearance"),
+            ("Cabin", "Please report cabin status"),
         ):
             btn = Button(text=caption)
             btn.bind(on_press=lambda _, p=phrase: self.set_phrase(p))
@@ -858,8 +866,12 @@ class CommsScreen(BoxLayout):
         if not text:
             return
 
-        self.atc_log.text += f"PILOT: {text}\nATC: [Processing...]\n\n"
+        self.atc_log.text += f"PILOT: {text}\n[Processing...]\n\n"
         self.pilot_input.text = ""
+        if self.cabin_callback and any(word in text.lower() for word in ("cabin", "flight attendant", "crew", "service")):
+            self.atc_log.text = self.atc_log.text.replace("[Processing...]\n\n", "", 1)
+            self.cabin_callback(text)
+            return
         telemetry = self.telemetry_receiver.snapshot()
         api_key = self.api_key.text.strip() or os.getenv("GROQ_API_KEY", "")
         threading.Thread(
@@ -877,7 +889,7 @@ class CommsScreen(BoxLayout):
         Clock.schedule_once(lambda _dt: self._append_response(response))
 
     def _append_response(self, response):
-        marker = "ATC: [Processing...]\n\n"
+        marker = "[Processing...]\n\n"
         if marker in self.atc_log.text:
             self.atc_log.text = self.atc_log.text.replace(marker, "", 1)
         self.atc_log.text += f"ATC: {response}\n\n"
@@ -1017,7 +1029,7 @@ class AeroflyATCApp(App):
         panel.add_widget(ops_tab)
 
         comms_tab = TabbedPanelItem(text="Comms")
-        comms_tab.add_widget(CommsScreen(self.receiver))
+        comms_tab.add_widget(CommsScreen(self.receiver, self.call_cabin_crew))
         panel.add_widget(comms_tab)
 
         scratch_tab = TabbedPanelItem(text="Scratchpad")
@@ -1032,6 +1044,11 @@ class AeroflyATCApp(App):
         self.flight_screen.update(data)
         self.route_tracker.add(data.get("lat", 0), data.get("lon", 0), data.get("callsign"))
         nearest = self.airports.nearest(data.get("lat", 0), data.get("lon", 0))
+        if data.get("connected"):
+            terrain_ft = self.elevation.elevation_ft(data.get("lat", 0), data.get("lon", 0))
+            active_airspace = self.airspace.active_at(data.get("lat", 0), data.get("lon", 0), data.get("altitude", 0))
+        else:
+            terrain_ft, active_airspace = None, []
         traffic = self.traffic_engine.update(data)
         terrain_alerts = self.terrain.check(data, nearest)
         if terrain_alerts and hasattr(self, "ops_status"): self.ops_status.text += "\\nWARNING: " + " | ".join(terrain_alerts)
