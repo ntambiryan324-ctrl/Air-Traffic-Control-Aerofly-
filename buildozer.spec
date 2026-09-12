@@ -1,23 +1,20 @@
 [app]
-title = AeroflyATC
+title = Aerofly Flight Companion
 package.name = aeroflyatc
-package.domain = com.ryan.aeroflyatc
+package.domain = org.aeroflycompanion
 source.dir = .
-source.include_exts = py,png,jpg,jpeg,kv,atlas
-source.exclude_dirs = .git,bin,build,__pycache__,.github
-version = 1.5.0
-requirements = python3,kivy
+source.include_exts = py,txt,png,jpg,jpeg,kv
+version = 2.0.0
+requirements = python3,kivy,pyjnius
 orientation = portrait
 fullscreen = 0
-android.permissions = INTERNET,ACCESS_NETWORK_STATE,RECORD_AUDIO
 android.api = 35
-android.minapi = 23
-android.ndk = 25b
-android.accept_sdk_license = True
+android.minapi = 24
+android.ndk = 29
 android.archs = arm64-v8a
-android.gradle_options = org.gradle.jvmargs=-Xmx4096m
-android.enable_androidx = True
+android.accept_sdk_license = True
+p4a.branch = master
 
 [buildozer]
 log_level = 2
-warn_on_root = 1
+warn_on_root = 0
