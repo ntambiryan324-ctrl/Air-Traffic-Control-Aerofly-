@@ -293,6 +293,50 @@ class TelemetryReceiver:
 
 
 
+
+class ATCController:
+    """Deterministic controller logic; AI is an optional response layer, not required for safety."""
+    def __init__(self):
+        self.callsign = "UNKNOWN"
+        self.frequency = "121.500"
+        self.controller = "GROUND"
+        self.last_instruction = ""
+        self.history = []
+
+    def identify(self, data):
+        cs = str(data.get("callsign") or data.get("sim_name") or "").strip()
+        if cs: self.callsign = cs
+        return self.callsign
+
+    def controller_for_phase(self, phase):
+        return {
+            "PARKED": "GROUND",
+            "GROUND": "GROUND",
+            "TAKEOFF": "TOWER",
+            "DEPARTURE": "DEPARTURE",
+            "CENTER": "CENTER",
+            "APPROACH": "APPROACH",
+        }.get(phase, "GROUND")
+
+    def generate(self, data):
+        self.callsign = self.identify(data)
+        new_controller = self.controller_for_phase(data.get("phase"))
+        if new_controller != self.controller:
+            self.controller = new_controller
+            self.frequency = {"GROUND":"121.900","TOWER":"118.100","DEPARTURE":"120.900","CENTER":"132.500","APPROACH":"119.100"}.get(new_controller,"121.500")
+            msg = "%s, contact %s on %s." % (self.callsign, new_controller.lower(), self.frequency)
+        elif data.get("phase") == "TAKEOFF":
+            msg = "%s, runway heading, cleared for takeoff." % self.callsign
+        elif data.get("vertical_speed", 0) < -2500:
+            msg = "%s, check altitude and vertical speed." % self.callsign
+        else:
+            msg = ""
+        if msg:
+            self.last_instruction = msg
+            self.history.append({"time": time.time(), "controller": self.controller, "frequency": self.frequency, "message": msg})
+            self.history = self.history[-100:]
+        return msg
+
 class FlightStateEngine:
     """Derives stable simulator state from telemetry without requiring cloud services."""
     def __init__(self):
@@ -809,6 +853,8 @@ class AeroflyATCApp(App):
         self.receiver = TelemetryReceiver()
         self.receiver.start()
         self.flight_state = FlightStateEngine()
+        self.atc_controller = ATCController()
+        self.audio_engine = AudioEngine()
         self.aerofly = AeroflyTCPConnector(self.receiver)
         self.aerofly.start("127.0.0.1")
 
@@ -880,6 +926,10 @@ class AeroflyATCApp(App):
     def update_ui(self, _dt):
         data = self.flight_state.update(self.receiver.snapshot())
         self.flight_screen.update(data)
+        atc_msg = self.atc_controller.generate(data)
+        if atc_msg and hasattr(self, "ops_status"):
+            self.ops_status.text += "\\nATC: " + atc_msg
+            speak_atc(self.audio_engine.radio_effect_text(atc_msg))
         if hasattr(self, "map_screen"):
             self.map_screen.update(data)
         if hasattr(self, "ops_status"):
