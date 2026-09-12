@@ -289,6 +289,56 @@ class TelemetryReceiver:
         self.sockets.clear()
 
 
+class AeroflyTCPConnector:
+    def __init__(self, receiver):
+        self.receiver = receiver
+        self.running = False
+        self.ip = "127.0.0.1"
+
+    def start(self, ip="127.0.0.1"):
+        self.ip = ip.strip() or "127.0.0.1"
+        if self.running: return
+        self.running = True
+        threading.Thread(target=self._loop, daemon=True).start()
+
+    def reconnect(self, ip):
+        self.ip = ip.strip() or "127.0.0.1"
+        if not self.running: self.start(self.ip)
+
+    def _loop(self):
+        while self.running:
+            sock = None
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(5)
+                sock.connect((self.ip, 58585))
+                sock.sendall(b"GET / HTTP/1.1\\r\\nHost: aerofly\\r\\n\\r\\n")
+                sock.settimeout(2)
+                buf = b""
+                while self.running:
+                    try: chunk = sock.recv(16384)
+                    except socket.timeout: continue
+                    if not chunk: break
+                    buf += chunk
+                    while b"\\n" in buf:
+                        line, buf = buf.split(b"\\n", 1)
+                        if line.strip(): self.receiver._record_packet(line.strip(), 58585, "TCP")
+                    txt = buf.decode("utf-8", errors="ignore")
+                    hits = re.findall(r"(?:XGPS|XATT)[^\\r\\n]+", txt)
+                    for line in hits: self.receiver._record_packet(line.encode(), 58585, "TCP")
+                    if hits: buf = b""
+            except Exception as exc:
+                print("Aerofly TCP:", exc)
+                with self.receiver.lock: self.receiver.latest_data["connected"] = False
+            finally:
+                if sock:
+                    try: sock.close()
+                    except OSError: pass
+                time.sleep(2)
+
+    def stop(self):
+        self.running = False
+
 def build_atc_prompt(user_text, telemetry):
     telemetry_text = json.dumps(
         {
