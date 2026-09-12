@@ -2,6 +2,8 @@ import json
 import math
 import os
 import re
+import urllib.request
+import urllib.parse
 import socket
 import threading
 import time
@@ -501,6 +503,52 @@ def speak_atc(text):
     except Exception as exc:
         print("TTS unavailable:", exc)
 
+
+
+def fetch_json(url, timeout=8):
+    req = urllib.request.Request(url, headers={"User-Agent": "AeroflyATC/1.2"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode("utf-8"))
+
+def weather_snapshot(icao):
+    """METAR/airport lookup via public aviationweather.gov API when network is available."""
+    icao = (icao or "").strip().upper()
+    if not re.fullmatch(r"[A-Z0-9]{4}", icao):
+        raise ValueError("ICAO must be four characters")
+    metar = fetch_json("https://aviationweather.gov/api/data/metar?ids=%s&format=json" % urllib.parse.quote(icao))
+    taf = fetch_json("https://aviationweather.gov/api/data/taf?ids=%s&format=json" % urllib.parse.quote(icao))
+    return {"icao": icao, "metar": metar, "taf": taf}
+
+class AudioEngine:
+def fetch_json(url, timeout=8):
+    req = urllib.request.Request(url, headers={"User-Agent": "AeroflyATC/1.2"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode("utf-8"))
+
+def weather_snapshot(icao):
+    """METAR/airport lookup via public aviationweather.gov API when network is available."""
+    icao = (icao or "").strip().upper()
+    if not re.fullmatch(r"[A-Z0-9]{4}", icao):
+        raise ValueError("ICAO must be four characters")
+    metar = fetch_json("https://aviationweather.gov/api/data/metar?ids=%s&format=json" % urllib.parse.quote(icao))
+    taf = fetch_json("https://aviationweather.gov/api/data/taf?ids=%s&format=json" % urllib.parse.quote(icao))
+    return {"icao": icao, "metar": metar, "taf": taf}
+
+
+    """Generates radio/cabin ambience without shipping copyrighted recordings."""
+    def __init__(self):
+        self.enabled = True
+        self.radio = True
+        self.cabin = True
+
+    def toggle(self):
+        self.enabled = not self.enabled
+
+    def radio_effect_text(self, message):
+        if not self.enabled or not self.radio:
+            return message
+        return "KRRR... " + str(message) + " ...KSH"
+
 class MovingMapScreen(BoxLayout):
     def __init__(self, receiver, **kwargs):
         super().__init__(orientation="vertical", padding=6, spacing=4, **kwargs)
@@ -800,6 +848,18 @@ class AeroflyATCApp(App):
         squawk_btn = Button(text="ASSIGN SQUAWK", size_hint_y=None, height=48)
         squawk_btn.bind(on_press=lambda *_: setattr(self.flight_state, "squawk", self.squawk_input.text.strip() or "2000"))
         ops.add_widget(squawk_btn)
+        wx_row = BoxLayout(size_hint_y=None, height=48, spacing=5)
+        self.icao_input = TextInput(text="EBBR", hint_text="ICAO", multiline=False)
+        wx_btn = Button(text="METAR/TAF", size_hint_x=0.35)
+        wx_btn.bind(on_press=self.load_weather)
+        wx_row.add_widget(self.icao_input)
+        wx_row.add_widget(wx_btn)
+        ops.add_widget(wx_row)
+        self.wx_status = Label(text="Weather: not loaded", size_hint_y=None, height=70)
+        ops.add_widget(self.wx_status)
+        atis_btn = Button(text="GENERATE ATIS", size_hint_y=None, height=48)
+        atis_btn.bind(on_press=self.generate_atis)
+        ops.add_widget(atis_btn)
         export_btn = Button(text="EXPORT FLIGHT LOG", size_hint_y=None, height=48)
         export_btn.bind(on_press=self.export_flight_log)
         ops.add_widget(export_btn)
@@ -829,6 +889,28 @@ class AeroflyATCApp(App):
 
     def on_pause(self):
         return True
+
+
+    def load_weather(self, _=None):
+        def worker():
+            try:
+                w = weather_snapshot(self.icao_input.text)
+                met = w["metar"][0] if w["metar"] else {}
+                taf = w["taf"][0] if w["taf"] else {}
+                text = "METAR %s: %s\\nTAF: %s" % (w["icao"], met.get("rawOb", "No METAR"), taf.get("rawTAF", "No TAF"))
+            except Exception as exc:
+                text = "Weather unavailable: " + str(exc)
+            Clock.schedule_once(lambda *_: setattr(self.wx_status, "text", text))
+        threading.Thread(target=worker, daemon=True).start()
+
+    def generate_atis(self, _=None):
+        data = self.receiver.snapshot()
+        wx = getattr(self, "wx_status", None)
+        raw = wx.text if wx else "Weather not loaded"
+        msg = "ATIS for %s. Information Alpha. Aircraft currently heading %03.0f degrees at %.0f knots. %s" % (self.icao_input.text.upper(), data.get("heading", 0), data.get("speed", 0), raw[:300])
+        if hasattr(self, "ops_status"):
+            self.ops_status.text += "\\n\\n" + msg
+        speak_atc(msg)
 
     def export_flight_log(self, _=None):
         try:
