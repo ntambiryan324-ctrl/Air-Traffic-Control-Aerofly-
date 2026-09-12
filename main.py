@@ -1062,12 +1062,13 @@ class AeroflyATCApp(App):
             names = ", ".join(a.get("name") or a.get("type") or a.get("class") for a in active_airspace[:3])
             self.ops_status.text += "\\nAIRSPACE: " + names
         announcement = self.cabin.update(data.get("phase"))
+        country = nearest.get("iso_country") if nearest else None
         if announcement:
-            speak_atc(announcement, region_voice_locale(data.get("lat"), data.get("lon")))
+            speak_atc(announcement, region_voice_locale(data.get("lat"), data.get("lon"), country))
         atc_msg = self.atc_controller.generate(data)
         if atc_msg and hasattr(self, "ops_status"):
             self.ops_status.text += "\\nATC: " + atc_msg
-            speak_atc(self.audio_engine.radio_effect_text(atc_msg), region_voice_locale(data.get("lat"), data.get("lon")))
+            speak_atc(self.audio_engine.radio_effect_text(atc_msg), region_voice_locale(data.get("lat"), data.get("lon"), country))
         if hasattr(self, "map_screen"):
             self.map_screen.update(data)
         if hasattr(self, "ops_status"):
@@ -1092,7 +1093,9 @@ class AeroflyATCApp(App):
     def call_cabin_crew(self, request):
         response = self.cabin.call_reply(request)
         data = self.receiver.snapshot()
-        speak_atc(response, region_voice_locale(data.get("lat"), data.get("lon")))
+        nearest = self.navdata.nearest(data.get("lat", 0), data.get("lon", 0))
+        country = nearest.get("iso_country") if nearest else None
+        speak_atc(response, region_voice_locale(data.get("lat"), data.get("lon"), country))
         if hasattr(self, "ops_status"):
             self.ops_status.text = "CABIN: " + response
 
