@@ -295,6 +295,37 @@ class TelemetryReceiver:
 
 
 
+
+class AirportDatabase:
+    """Small offline airport/airspace database; can be expanded without changing telemetry."""
+    AIRPORTS = {
+        "EBBR": {"name":"Brussels Airport","lat":50.9010,"lon":4.4844,"elev":184},
+        "UGEE": {"name":"Entebbe International","lat":0.0424,"lon":32.4435,"elev":3782},
+        "HCAA": {"name":"Cairo International","lat":30.1219,"lon":31.4056,"elev":382},
+        "EHAM": {"name":"Amsterdam Schiphol","lat":52.3086,"lon":4.7639,"elev":-11},
+    }
+
+    @classmethod
+    def nearest(cls, lat, lon):
+        best=None
+        best_d=10**99
+        for ident,a in cls.AIRPORTS.items():
+            d=((lat-a["lat"])*110540)**2+((lon-a["lon"])*111320)**2
+            if d<best_d:
+                best_d=d; best=(ident,a)
+        return best
+
+class TerrainWarningEngine:
+    """Conservative terrain sanity checks using airport elevation when available."""
+    def check(self, data, nearest):
+        if not nearest: return []
+        ident, airport = nearest
+        alt = float(data.get("altitude",0) or 0)
+        elev = airport["elev"]
+        if alt < elev + 500 and not data.get("on_ground", False):
+            return ["LOW ALTITUDE NEAR %s" % ident]
+        return []
+
 class FlightReplay:
     def __init__(self, state):
         self.state = state
@@ -898,6 +929,8 @@ class AeroflyATCApp(App):
         self.replay = FlightReplay(self.flight_state)
         self.route_tracker = RouteTracker()
         self.traffic_engine = TrafficEngine()
+        self.airports = AirportDatabase()
+        self.terrain = TerrainWarningEngine()
         self.aerofly = AeroflyTCPConnector(self.receiver)
         self.aerofly.start("127.0.0.1")
 
@@ -970,7 +1003,10 @@ class AeroflyATCApp(App):
         data = self.flight_state.update(self.receiver.snapshot())
         self.flight_screen.update(data)
         self.route_tracker.add(data.get("lat", 0), data.get("lon", 0), data.get("callsign"))
+        nearest = self.airports.nearest(data.get("lat", 0), data.get("lon", 0))
         traffic = self.traffic_engine.update(data)
+        terrain_alerts = self.terrain.check(data, nearest)
+        if terrain_alerts and hasattr(self, "ops_status"): self.ops_status.text += "\\nWARNING: " + " | ".join(terrain_alerts)
         alerts = self.traffic_engine.conflict(data, traffic)
         if alerts and hasattr(self, "ops_status"): self.ops_status.text += "\\nTRAFFIC: " + " | ".join(alerts)
         atc_msg = self.atc_controller.generate(data)
