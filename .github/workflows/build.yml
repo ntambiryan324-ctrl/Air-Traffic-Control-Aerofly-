@@ -40,7 +40,7 @@ jobs:
 
       - name: Static syntax check
         run: |
-          python -m py_compile main.py
+          python -m py_compile main.py aviation_features.py
 
       - name: Build debug APK
         run: |
