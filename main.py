@@ -1,271 +1,561 @@
-import os
-import sys
-import socket
 import json
+import os
+import re
+import socket
 import threading
 import time
-import urllib.request
 import urllib.error
+import urllib.request
 
 from kivy.app import App
+from kivy.clock import Clock
 from kivy.uix.boxlayout import BoxLayout
+from kivy.uix.button import Button
 from kivy.uix.gridlayout import GridLayout
 from kivy.uix.label import Label
-from kivy.uix.button import Button
-from kivy.uix.textinput import TextInput
 from kivy.uix.tabbedpanel import TabbedPanel, TabbedPanelItem
-from kivy.clock import Clock
-from kivy.graphics import Color, Rectangle
+from kivy.uix.textinput import TextInput
+
+
+APP_VERSION = "1.1.0"
+TELEMETRY_PORTS = (49002, 58585)
+GROQ_MODEL = "openai/gpt-oss-20b"
 
 
 def load_env_file(filepath=".env"):
-    """Loads environment variables from a local .env file if present."""
-    if os.path.exists(filepath):
-        try:
-            with open(filepath, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if line and not line.startswith("#") and "=" in line:
-                        key, val = line.split("=", 1)
-                        os.environ[key.strip()] = val.strip().strip('"').strip("'")
-        except Exception as e:
-            print(f"Error loading .env file: {e}")
+    # Desktop convenience only. .env is intentionally not packaged into Android.
+    if not os.path.exists(filepath):
+        return
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    key, val = line.split("=", 1)
+                    os.environ[key.strip()] = val.strip().strip('"').strip("'")
+    except OSError:
+        pass
 
 
 load_env_file()
 
 
-def call_groq_atc(prompt, system_prompt="You are an Air Traffic Controller providing concise, accurate aviation communications based on pilot requests and telemetry."):
-    """Queries the Groq API using standard Python libraries to ensure mobile compatibility."""
-    api_key = os.getenv("GROQ_API_KEY", "")
-    if not api_key:
-        return "ERROR: GROQ_API_KEY is not configured."
+def safe_float(value, default=0.0):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
-    url = "https://api.groq.com/openai/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json"
+
+def safe_int(value, default=0):
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def normalise_telemetry(obj):
+    """Accept common JSON and key=value telemetry naming conventions."""
+    if not isinstance(obj, dict):
+        return None
+
+    # Flatten one common nested vehicle/state object.
+    flat = dict(obj)
+    for parent in ("telemetry", "state", "aircraft", "flight"):
+        child = obj.get(parent)
+        if isinstance(child, dict):
+            flat.update(child)
+
+    aliases = {
+        "altitude": ("altitude", "alt", "altitude_ft", "alt_ft", "indicated_altitude"),
+        "speed": ("speed", "airspeed", "ias", "ias_kt", "speed_kt", "airspeed_kt"),
+        "heading": ("heading", "hdg", "heading_deg", "track"),
+        "lat": ("lat", "latitude"),
+        "lon": ("lon", "lng", "longitude"),
+        "callsign": ("callsign", "call_sign", "flight_id", "aircraft_id"),
+        "vertical_speed": ("vertical_speed", "vs", "vs_fpm", "vertical_speed_fpm"),
+        "on_ground": ("on_ground", "onground", "grounded"),
     }
-    payload = {
-        "model": "llama-3.3-70b-versatile",
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": prompt}
-        ],
-        "temperature": 0.3
-    }
+
+    result = {}
+    for target, keys in aliases.items():
+        for key in keys:
+            if key in flat and flat[key] not in (None, ""):
+                result[target] = flat[key]
+                break
+
+    if not result:
+        return None
+
+    result["altitude"] = safe_float(result.get("altitude"), 0)
+    result["speed"] = safe_float(result.get("speed"), 0)
+    result["heading"] = safe_float(result.get("heading"), 0) % 360
+    result["lat"] = safe_float(result.get("lat"), 0)
+    result["lon"] = safe_float(result.get("lon"), 0)
+    result["vertical_speed"] = safe_float(result.get("vertical_speed"), 0)
+    result["on_ground"] = bool(result.get("on_ground", False))
+    result["callsign"] = str(result.get("callsign", "")).strip()
+    return result
+
+
+def parse_telemetry_packet(data):
+    """Parse JSON or simple key=value / key:value UDP/TCP packets.
+
+    This deliberately does not claim that either port is an Aerofly-native
+    protocol. It accepts structured telemetry if an external bridge sends it.
+    """
+    try:
+        text = data.decode("utf-8", errors="ignore").strip()
+    except Exception:
+        return None
+
+    if not text:
+        return None
 
     try:
-        req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers)
-        with urllib.request.urlopen(req, timeout=10) as response:
-            res_data = json.loads(response.read().decode("utf-8"))
-            return res_data["choices"][0]["message"]["content"]
-    except urllib.error.HTTPError as e:
-        return f"ATC Communications Error (HTTP {e.code}): {e.reason}"
-    except Exception as e:
-        return f"ATC Communications Error: {str(e)}"
+        parsed = json.loads(text)
+        result = normalise_telemetry(parsed)
+        if result:
+            return result
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        pass
+
+    pairs = {}
+    for key, value in re.findall(r"([A-Za-z_][A-Za-z0-9_]*)\s*[:=]\s*([^\s,;|]+)", text):
+        pairs[key.lower()] = value
+
+    if pairs:
+        return normalise_telemetry(pairs)
+
+    return None
 
 
 class TelemetryReceiver:
-    """Listens for UDP telemetry broadcast from flight simulators on port 49002."""
-    def __init__(self, port=49002):
-        self.port = port
+    def __init__(self, ports=TELEMETRY_PORTS):
+        self.ports = tuple(ports)
         self.running = False
+        self.lock = threading.Lock()
         self.latest_data = {
             "connected": False,
-            "altitude": 0,
-            "speed": 0,
-            "heading": 0,
+            "port": None,
+            "protocol": None,
+            "altitude": 0.0,
+            "speed": 0.0,
+            "heading": 0.0,
             "lat": 0.0,
-            "lon": 0.0
+            "lon": 0.0,
+            "vertical_speed": 0.0,
+            "on_ground": False,
+            "callsign": "",
+            "last_packet": 0.0,
+            "packet_count": 0,
+            "raw_packets": 0,
         }
-        self.socket = None
+        self.sockets = []
 
     def start(self):
+        if self.running:
+            return
         self.running = True
-        thread = threading.Thread(target=self._listen, daemon=True)
-        thread.start()
+        for port in self.ports:
+            threading.Thread(target=self._udp_listener, args=(port,), daemon=True).start()
+            threading.Thread(target=self._tcp_listener, args=(port,), daemon=True).start()
 
-    def _listen(self):
+    def _record_packet(self, data, port, protocol):
+        now = time.time()
+        parsed = parse_telemetry_packet(data)
+        with self.lock:
+            self.latest_data["raw_packets"] += 1
+            self.latest_data["last_packet"] = now
+            self.latest_data["port"] = port
+            self.latest_data["protocol"] = protocol
+            self.latest_data["connected"] = True
+            if parsed:
+                self.latest_data.update(parsed)
+                self.latest_data["packet_count"] += 1
+
+    def _udp_listener(self, port):
+        sock = None
         try:
-            self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            self.socket.bind(("", self.port))
-            self.socket.settimeout(2.0)
-            
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind(("", port))
+            sock.settimeout(1.0)
+            self.sockets.append(sock)
             while self.running:
                 try:
-                    data, _ = self.socket.recvfrom(2048)
+                    data, _ = sock.recvfrom(8192)
                     if data:
-                        self.latest_data["connected"] = True
-                        # Telemetry payload parsing can be extended per specific sim data format
+                        self._record_packet(data, port, "UDP")
                 except socket.timeout:
-                    self.latest_data["connected"] = False
-        except Exception as e:
-            print(f"Socket error: {e}")
+                    continue
+                except OSError:
+                    break
+        except OSError as exc:
+            print(f"UDP {port} unavailable: {exc}")
         finally:
-            if self.socket:
-                self.socket.close()
+            if sock:
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+
+    def _tcp_listener(self, port):
+        server = None
+        try:
+            server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            server.bind(("", port))
+            server.listen(3)
+            server.settimeout(1.0)
+            self.sockets.append(server)
+            while self.running:
+                try:
+                    conn, _ = server.accept()
+                    conn.settimeout(1.0)
+                    threading.Thread(
+                        target=self._tcp_client,
+                        args=(conn, port),
+                        daemon=True,
+                    ).start()
+                except socket.timeout:
+                    continue
+                except OSError:
+                    break
+        except OSError as exc:
+            print(f"TCP {port} unavailable: {exc}")
+        finally:
+            if server:
+                try:
+                    server.close()
+                except OSError:
+                    pass
+
+    def _tcp_client(self, conn, port):
+        try:
+            buffer = b""
+            while self.running:
+                chunk = conn.recv(8192)
+                if not chunk:
+                    break
+                buffer += chunk
+                # Handle newline-delimited JSON/key=value packets.
+                while b"\n" in buffer:
+                    packet, buffer = buffer.split(b"\n", 1)
+                    if packet.strip():
+                        self._record_packet(packet, port, "TCP")
+                # Also accept a complete JSON object without newline.
+                stripped = buffer.strip()
+                if stripped.startswith(b"{") and stripped.endswith(b"}"):
+                    self._record_packet(stripped, port, "TCP")
+                    buffer = b""
+        except (OSError, socket.timeout):
+            pass
+        finally:
+            try:
+                conn.close()
+            except OSError:
+                pass
+
+    def snapshot(self):
+        with self.lock:
+            data = dict(self.latest_data)
+        if data["last_packet"] and time.time() - data["last_packet"] > 4:
+            data["connected"] = False
+        return data
 
     def stop(self):
         self.running = False
+        for sock in list(self.sockets):
+            try:
+                sock.close()
+            except OSError:
+                pass
+        self.sockets.clear()
+
+
+def build_atc_prompt(user_text, telemetry):
+    telemetry_text = json.dumps(
+        {
+            "connected": telemetry["connected"],
+            "source": f'{telemetry["protocol"] or "none"}:{telemetry["port"] or "-"}',
+            "callsign": telemetry["callsign"],
+            "altitude_ft": round(telemetry["altitude"], 1),
+            "airspeed_kt": round(telemetry["speed"], 1),
+            "heading_deg": round(telemetry["heading"], 1),
+            "latitude": round(telemetry["lat"], 6),
+            "longitude": round(telemetry["lon"], 6),
+            "vertical_speed_fpm": round(telemetry["vertical_speed"], 1),
+            "on_ground": telemetry["on_ground"],
+        }
+    )
+    return (
+        "Pilot transmission: "
+        + user_text
+        + "\nCurrent simulator telemetry: "
+        + telemetry_text
+        + "\nRespond as a concise simulated ATC controller. "
+        "Use standard aviation phraseology where practical. "
+        "Do not invent runway, frequency, clearance, traffic, weather, or navigation "
+        "data that is not supplied. If information is missing, ask for it. "
+        "This is a flight-simulation aid, not real-world ATC."
+    )
+
+
+def call_groq_atc(prompt, api_key):
+    if not api_key:
+        return None, "No Groq API key configured."
+
+    payload = {
+        "model": GROQ_MODEL,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "You are a realistic flight-simulation ATC controller. "
+                    "Be concise, operational, and never pretend to have real-world "
+                    "radar or airport data."
+                ),
+            },
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0.2,
+        "max_tokens": 180,
+    }
+
+    req = urllib.request.Request(
+        "https://api.groq.com/openai/v1/chat/completions",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=20) as response:
+            result = json.loads(response.read().decode("utf-8"))
+        return result["choices"][0]["message"]["content"].strip(), None
+    except urllib.error.HTTPError as exc:
+        detail = ""
+        try:
+            detail = exc.read().decode("utf-8", errors="ignore")[:300]
+        except Exception:
+            pass
+        return None, f"Groq HTTP {exc.code}: {detail or exc.reason}"
+    except Exception as exc:
+        return None, f"Groq error: {exc}"
+
+
+def offline_atc_response(text, telemetry):
+    lower = text.lower()
+    callsign = telemetry["callsign"] or "aircraft"
+    if "taxi" in lower:
+        return f"{callsign}, taxi request received. State your departure runway and current position."
+    if "takeoff" in lower or "departure" in lower:
+        return f"{callsign}, departure request received. State your runway and departure procedure."
+    if "landing" in lower or "approach" in lower:
+        return f"{callsign}, approach request received. State your runway or approach and current altitude."
+    if "frequency" in lower:
+        return f"{callsign}, frequency request received. State the airport or controlling facility."
+    return f"{callsign}, transmission received. Simulated ATC is in offline mode; provide airport, position, altitude, and request."
 
 
 class MyFlightScreen(BoxLayout):
     def __init__(self, **kwargs):
-        super().__init__(orientation="vertical", padding=15, spacing=10, **kwargs)
-        
-        self.status_label = Label(text="Telemetry Status: Disconnected", size_hint_y=0.1, font_size="16sp", color=(1, 0.3, 0.3, 1))
+        super().__init__(orientation="vertical", padding=12, spacing=8, **kwargs)
+        self.status_label = Label(text="Telemetry: scanning UDP/TCP 49002 + 58585", size_hint_y=None, height=36)
         self.add_widget(self.status_label)
 
-        grid = GridLayout(cols=2, spacing=10, size_hint_y=0.7)
-        
-        grid.add_widget(Label(text="Altitude (ft):", font_size="16sp"))
-        self.alt_val = Label(text="0", font_size="16sp")
-        grid.add_widget(self.alt_val)
-
-        grid.add_widget(Label(text="Airspeed (kts):", font_size="16sp"))
-        self.spd_val = Label(text="0", font_size="16sp")
-        grid.add_widget(self.spd_val)
-
-        grid.add_widget(Label(text="Heading (°):", font_size="16sp"))
-        self.hdg_val = Label(text="000", font_size="16sp")
-        grid.add_widget(self.hdg_val)
-
-        grid.add_widget(Label(text="Latitude / Longitude:", font_size="16sp"))
-        self.pos_val = Label(text="0.0000 / 0.0000", font_size="16sp")
-        grid.add_widget(self.pos_val)
-
+        grid = GridLayout(cols=2, spacing=8)
+        self.values = {}
+        for label, key, default in (
+            ("Source", "source", "None"),
+            ("Calls­ign", "callsign", "—"),
+            ("Altitude (ft)", "altitude", "0"),
+            ("Airspeed (kt)", "speed", "0"),
+            ("Heading", "heading", "000"),
+            ("Vertical speed", "vertical_speed", "0"),
+            ("Latitude", "lat", "0.000000"),
+            ("Longitude", "lon", "0.000000"),
+            ("Packets", "packet_count", "0"),
+        ):
+            grid.add_widget(Label(text=label, font_size="15sp"))
+            value = Label(text=default, font_size="15sp")
+            self.values[key] = value
+            grid.add_widget(value)
         self.add_widget(grid)
 
-    def update_telemetry(self, data):
-        if data["connected"]:
-            self.status_label.text = "Telemetry Status: Connected (UDP 49002)"
-            self.status_label.color = (0.3, 1, 0.3, 1)
-        else:
-            self.status_label.text = "Telemetry Status: Searching for Sim Telemetry..."
-            self.status_label.color = (1, 0.7, 0.2, 1)
-
-        self.alt_val.text = f"{data['altitude']:,}"
-        self.spd_val.text = f"{data['speed']}"
-        self.hdg_val.text = f"{data['heading']:03d}"
-        self.pos_val.text = f"{data['lat']:.4f} / {data['lon']:.4f}"
+    def update(self, data):
+        connected = data["connected"]
+        source = f'{data["protocol"]}:{data["port"]}' if connected else "No telemetry"
+        self.status_label.text = (
+            f"Telemetry CONNECTED — {source}"
+            if connected
+            else "Telemetry scanning UDP/TCP 49002 + 58585"
+        )
+        self.values["source"].text = source
+        self.values["callsign"].text = data["callsign"] or "—"
+        self.values["altitude"].text = f'{data["altitude"]:,.0f}'
+        self.values["speed"].text = f'{data["speed"]:.0f}'
+        self.values["heading"].text = f'{data["heading"]:03.0f}'
+        self.values["vertical_speed"].text = f'{data["vertical_speed"]:.0f}'
+        self.values["lat"].text = f'{data["lat"]:.6f}'
+        self.values["lon"].text = f'{data["lon"]:.6f}'
+        self.values["packet_count"].text = str(data["packet_count"])
 
 
 class CommsScreen(BoxLayout):
-    def __init__(self, **kwargs):
-        super().__init__(orientation="vertical", padding=15, spacing=10, **kwargs)
+    def __init__(self, telemetry_receiver, **kwargs):
+        super().__init__(orientation="vertical", padding=12, spacing=8, **kwargs)
+        self.telemetry_receiver = telemetry_receiver
 
-        self.add_widget(Label(text="ATC Transmission Log", size_hint_y=0.08, font_size="16sp"))
-        
-        self.atc_log = TextInput(readonly=True, multiline=True, size_hint_y=0.6, font_size="14sp")
+        self.add_widget(Label(text="ATC Communications", size_hint_y=None, height=32, font_size="18sp"))
+
+        key_row = BoxLayout(size_hint_y=None, height=48, spacing=6)
+        key_row.add_widget(Label(text="Groq key:", size_hint_x=0.25))
+        self.api_key = TextInput(
+            hint_text="Paste your Groq API key (stored only in this running app)",
+            password=True,
+            multiline=False,
+        )
+        key_row.add_widget(self.api_key)
+        self.add_widget(key_row)
+
+        quick = BoxLayout(size_hint_y=None, height=44, spacing=6)
+        for caption, phrase in (
+            ("Taxi", "Request taxi clearance"),
+            ("Departure", "Request departure clearance"),
+            ("Approach", "Request approach clearance"),
+        ):
+            btn = Button(text=caption)
+            btn.bind(on_press=lambda _, p=phrase: self.set_phrase(p))
+            quick.add_widget(btn)
+        self.add_widget(quick)
+
+        self.atc_log = TextInput(readonly=True, multiline=True, font_size="14sp")
         self.add_widget(self.atc_log)
 
-        input_box = BoxLayout(orientation="horizontal", size_hint_y=0.15, spacing=10)
-        self.pilot_input = TextInput(hint_text="Type transmission (e.g., 'Request taxi clearance to RWY 18')...", multiline=False)
-        send_btn = Button(text="Transmit", size_hint_x=0.3)
+        input_box = BoxLayout(size_hint_y=None, height=54, spacing=6)
+        self.pilot_input = TextInput(
+            hint_text="Type pilot transmission...",
+            multiline=False,
+        )
+        send_btn = Button(text="Transmit", size_hint_x=0.28)
         send_btn.bind(on_press=self.send_transmission)
-
         input_box.add_widget(self.pilot_input)
         input_box.add_widget(send_btn)
         self.add_widget(input_box)
 
-    def send_transmission(self, instance):
+    def set_phrase(self, phrase):
+        self.pilot_input.text = phrase
+        self.pilot_input.focus = True
+
+    def send_transmission(self, _):
         text = self.pilot_input.text.strip()
         if not text:
             return
 
-        self.atc_log.text += f"\nPILOT: {text}\n"
+        self.atc_log.text += f"PILOT: {text}\nATC: [Processing...]\n\n"
         self.pilot_input.text = ""
-        self.atc_log.text += "ATC: [Processing transmission...]\n"
+        telemetry = self.telemetry_receiver.snapshot()
+        api_key = self.api_key.text.strip() or os.getenv("GROQ_API_KEY", "")
+        threading.Thread(
+            target=self._process_atc,
+            args=(text, telemetry, api_key),
+            daemon=True,
+        ).start()
 
-        threading.Thread(target=self._process_atc, args=(text,), daemon=True).start()
+    def _process_atc(self, text, telemetry, api_key):
+        response, error = call_groq_atc(build_atc_prompt(text, telemetry), api_key)
+        if not response:
+            response = offline_atc_response(text, telemetry)
+            if error:
+                response += f"\n[AI unavailable: {error}]"
+        Clock.schedule_once(lambda _dt: self._append_response(response))
 
-    def _process_atc(self, prompt):
-        response = call_groq_atc(prompt)
-        Clock.schedule_once(lambda dt: self._append_atc_response(response))
-
-    def _append_atc_response(self, response):
-        lines = self.atc_log.text.split("\n")
-        if lines and "Processing transmission" in lines[-2]:
-            lines.pop(-2)
-        self.atc_log.text = "\n".join(lines) + f"ATC: {response}\n"
+    def _append_response(self, response):
+        marker = "ATC: [Processing...]\n\n"
+        if marker in self.atc_log.text:
+            self.atc_log.text = self.atc_log.text.replace(marker, "", 1)
+        self.atc_log.text += f"ATC: {response}\n\n"
 
 
 class ScratchpadScreen(BoxLayout):
     def __init__(self, **kwargs):
-        super().__init__(orientation="vertical", padding=15, spacing=10, **kwargs)
-        
-        self.add_widget(Label(text="C.R.A.F.T. IFR Clearance Scratchpad", size_hint_y=0.08, font_size="16sp"))
+        super().__init__(orientation="vertical", padding=12, spacing=8, **kwargs)
+        self.add_widget(Label(text="C.R.A.F.T. IFR Clearance Scratchpad", size_hint_y=None, height=34))
+        grid = GridLayout(cols=2, spacing=8)
+        self.fields = {}
+        for label, key in (
+            ("C — Clearance limit", "clearance"),
+            ("R — Route", "route"),
+            ("A — Altitude", "altitude"),
+            ("F — Frequency", "frequency"),
+            ("T — Squawk", "squawk"),
+        ):
+            grid.add_widget(Label(text=label))
+            field = TextInput(multiline=False)
+            self.fields[key] = field
+            grid.add_widget(field)
+        self.add_widget(grid)
 
-        craft_grid = GridLayout(cols=2, spacing=10, size_hint_y=0.6)
+        buttons = BoxLayout(size_hint_y=None, height=48, spacing=8)
+        clear = Button(text="Clear")
+        clear.bind(on_press=self.clear_fields)
+        buttons.add_widget(clear)
+        copy = Button(text="Build Clearance")
+        copy.bind(on_press=self.build_clearance)
+        buttons.add_widget(copy)
+        self.add_widget(buttons)
 
-        craft_grid.add_widget(Label(text="C - Clearance Limit:", font_size="14sp"))
-        self.clearance_in = TextInput(multiline=False)
-        craft_grid.add_widget(self.clearance_in)
+        self.output = TextInput(readonly=True, multiline=True, size_hint_y=0.3)
+        self.add_widget(self.output)
 
-        craft_grid.add_widget(Label(text="R - Route:", font_size="14sp"))
-        self.route_in = TextInput(multiline=False)
-        craft_grid.add_widget(self.route_in)
+    def clear_fields(self, _):
+        for field in self.fields.values():
+            field.text = ""
+        self.output.text = ""
 
-        craft_grid.add_widget(Label(text="A - Altitude:", font_size="14sp"))
-        self.altitude_in = TextInput(multiline=False)
-        craft_grid.add_widget(self.altitude_in)
-
-        craft_grid.add_widget(Label(text="F - Frequency:", font_size="14sp"))
-        self.freq_in = TextInput(multiline=False)
-        craft_grid.add_widget(self.freq_in)
-
-        craft_grid.add_widget(Label(text="T - Transponder (Squawk):", font_size="14sp"))
-        self.squawk_in = TextInput(multiline=False)
-        craft_grid.add_widget(self.squawk_in)
-
-        self.add_widget(craft_grid)
-
-        clear_btn = Button(text="Clear Scratchpad", size_hint_y=0.1)
-        clear_btn.bind(on_press=self.clear_fields)
-        self.add_widget(clear_btn)
-
-    def clear_fields(self, instance):
-        self.clearance_in.text = ""
-        self.route_in.text = ""
-        self.altitude_in.text = ""
-        self.freq_in.text = ""
-        self.squawk_in.text = ""
+    def build_clearance(self, _):
+        parts = []
+        for key in ("clearance", "route", "altitude", "frequency", "squawk"):
+            value = self.fields[key].text.strip()
+            if value:
+                parts.append(value)
+        self.output.text = " | ".join(parts) if parts else "Enter clearance items above."
 
 
 class AeroflyATCApp(App):
     def build(self):
-        self.title = "AeroflyATC Companion"
-        
+        self.title = f"AeroflyATC {APP_VERSION}"
         self.receiver = TelemetryReceiver()
         self.receiver.start()
 
-        tab_panel = TabbedPanel(do_default_tab=False)
+        panel = TabbedPanel(do_default_tab=False)
 
-        # Tab 1: My Flight
         self.flight_screen = MyFlightScreen()
-        tab_flight = TabbedPanelItem(text="My Flight")
-        tab_flight.add_widget(self.flight_screen)
-        tab_panel.add_widget(tab_flight)
+        flight_tab = TabbedPanelItem(text="My Flight")
+        flight_tab.add_widget(self.flight_screen)
+        panel.add_widget(flight_tab)
 
-        # Tab 2: Comms
-        self.comms_screen = CommsScreen()
-        tab_comms = TabbedPanelItem(text="Comms")
-        tab_comms.add_widget(self.comms_screen)
-        tab_panel.add_widget(tab_comms)
+        comms_tab = TabbedPanelItem(text="Comms")
+        comms_tab.add_widget(CommsScreen(self.receiver))
+        panel.add_widget(comms_tab)
 
-        # Tab 3: Scratchpad
-        self.scratchpad_screen = ScratchpadScreen()
-        tab_scratchpad = TabbedPanelItem(text="Scratchpad")
-        tab_scratchpad.add_widget(self.scratchpad_screen)
-        tab_panel.add_widget(tab_scratchpad)
+        scratch_tab = TabbedPanelItem(text="Scratchpad")
+        scratch_tab.add_widget(ScratchpadScreen())
+        panel.add_widget(scratch_tab)
 
-        Clock.schedule_interval(self.update_ui, 1.0)
-        return tab_panel
+        Clock.schedule_interval(self.update_ui, 0.5)
+        return panel
 
-    def update_ui(self, dt):
-        self.flight_screen.update_telemetry(self.receiver.latest_data)
+    def update_ui(self, _dt):
+        self.flight_screen.update(self.receiver.snapshot())
+
+    def on_pause(self):
+        return True
 
     def on_stop(self):
         self.receiver.stop()
@@ -273,4 +563,3 @@ class AeroflyATCApp(App):
 
 if __name__ == "__main__":
     AeroflyATCApp().run()
-
