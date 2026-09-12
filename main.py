@@ -1055,7 +1055,12 @@ class AeroflyATCApp(App):
             terrain_ft, active_airspace = None, []
         traffic = self.traffic_engine.update(data)
         terrain_alerts = self.terrain.check(data, nearest)
+        if terrain_ft is not None and data.get("altitude", 0) - terrain_ft < 1000 and not data.get("on_ground", False):
+            terrain_alerts.append("TERRAIN CLEARANCE %.0f FT" % (data.get("altitude", 0) - terrain_ft))
         if terrain_alerts and hasattr(self, "ops_status"): self.ops_status.text += "\\nWARNING: " + " | ".join(terrain_alerts)
+        if active_airspace and hasattr(self, "ops_status"):
+            names = ", ".join(a.get("name") or a.get("type") or a.get("class") for a in active_airspace[:3])
+            self.ops_status.text += "\\nAIRSPACE: " + names
         announcement = self.cabin.update(data.get("phase"))
         if announcement:
             speak_atc(announcement, region_voice_locale(data.get("lat"), data.get("lon")))
