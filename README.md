@@ -27,3 +27,14 @@ Recommended current model: `openai/gpt-oss-20b`.
 ## Build
 
 Push to `main` or manually run the **Build Android APK** GitHub Actions workflow. The resulting APK is uploaded as the `AeroflyATC-debug-apk` artifact.
+
+
+## Direct Aerofly connection
+
+Aerofly FS has built-in FSWidgets support. Enable "Send flight data to FSWidgets Apps" in Settings > Miscellaneous. The documented connection target is TCP port 58585. AeroflyATC now connects to that endpoint directly and parses the ForeFlight-compatible XGPS and XATT records. UDP 49002 remains supported as a fallback.
+
+For Aerofly FS Global and AeroflyATC on the same Android tablet, use 127.0.0.1. If Aerofly is running on another device, enter that device's LAN IPv4 address in the Connect tab.
+
+## Voice and moving map
+
+The Comms tab now provides Android speech recognition for pilot transmissions and Android Text-to-Speech for ATC replies. The Map tab displays the aircraft position, heading and recent track in a lightweight moving/radar display.
