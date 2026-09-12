@@ -18,10 +18,11 @@ from kivy.uix.gridlayout import GridLayout
 from kivy.uix.label import Label
 from kivy.uix.tabbedpanel import TabbedPanel, TabbedPanelItem
 from kivy.uix.textinput import TextInput
-from kivy.graphics import Color, Line, Triangle
+from kivy.graphics import Color, Line, Triangle, Rectangle
+from aviation_features import AirspaceStore, SRTMElevation, CabinCrewEngine, OSMTileCache, AirportData, region_voice_locale
 
 
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.3.0"
 TELEMETRY_PORTS = (49002, 58585)
 GROQ_MODEL = "openai/gpt-oss-20b"
 
@@ -606,51 +607,40 @@ def offline_atc_response(text, telemetry):
 
 
 
-def speak_atc(text):
+def speak_atc(text, locale="en-GB"):
     try:
         from jnius import autoclass
         Activity = autoclass("org.kivy.android.PythonActivity")
         TTS = autoclass("android.speech.tts.TextToSpeech")
         Locale = autoclass("java.util.Locale")
         tts = TTS(Activity.mActivity, None)
-        tts.setLanguage(Locale.US)
+        requested = Locale.forLanguageTag(locale)
+        if tts.isLanguageAvailable(requested) >= TTS.LANG_AVAILABLE:
+            tts.setLanguage(requested)
+        else:
+            tts.setLanguage(Locale.US)
+        tts.setSpeechRate(0.94)
         tts.speak(str(text), TTS.QUEUE_FLUSH, None, "atc")
     except Exception as exc:
         print("TTS unavailable:", exc)
 
 
-
 def fetch_json(url, timeout=8):
     req = urllib.request.Request(url, headers={"User-Agent": "AeroflyATC/1.2"})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read().decode("utf-8"))
 
+
 def weather_snapshot(icao):
-    """METAR/airport lookup via public aviationweather.gov API when network is available."""
     icao = (icao or "").strip().upper()
     if not re.fullmatch(r"[A-Z0-9]{4}", icao):
         raise ValueError("ICAO must be four characters")
     metar = fetch_json("https://aviationweather.gov/api/data/metar?ids=%s&format=json" % urllib.parse.quote(icao))
     taf = fetch_json("https://aviationweather.gov/api/data/taf?ids=%s&format=json" % urllib.parse.quote(icao))
     return {"icao": icao, "metar": metar, "taf": taf}
+
 
 class AudioEngine:
-def fetch_json(url, timeout=8):
-    req = urllib.request.Request(url, headers={"User-Agent": "AeroflyATC/1.2"})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return json.loads(r.read().decode("utf-8"))
-
-def weather_snapshot(icao):
-    """METAR/airport lookup via public aviationweather.gov API when network is available."""
-    icao = (icao or "").strip().upper()
-    if not re.fullmatch(r"[A-Z0-9]{4}", icao):
-        raise ValueError("ICAO must be four characters")
-    metar = fetch_json("https://aviationweather.gov/api/data/metar?ids=%s&format=json" % urllib.parse.quote(icao))
-    taf = fetch_json("https://aviationweather.gov/api/data/taf?ids=%s&format=json" % urllib.parse.quote(icao))
-    return {"icao": icao, "metar": metar, "taf": taf}
-
-
-    """Generates radio/cabin ambience without shipping copyrighted recordings."""
     def __init__(self):
         self.enabled = True
         self.radio = True
@@ -661,21 +651,26 @@ def weather_snapshot(icao):
 
     def radio_effect_text(self, message):
         if not self.enabled or not self.radio:
-            return message
+            return str(message)
         return "KRRR... " + str(message) + " ...KSH"
 
+
 class MovingMapScreen(BoxLayout):
-    def __init__(self, receiver, **kwargs):
+    def __init__(self, receiver, tile_cache=None, **kwargs):
         super().__init__(orientation="vertical", padding=6, spacing=4, **kwargs)
         self.receiver = receiver
+        self.tile_cache = tile_cache
         self.trail = []
+        self.last_tile_key = None
         self.add_widget(Label(text="LIVE MOVING MAP / RADAR", size_hint_y=None, height=32))
         self.status = Label(text="Waiting for Aerofly telemetry...", size_hint_y=None, height=28)
         self.add_widget(self.status)
         self.map_box = BoxLayout()
         self.add_widget(self.map_box)
         with self.map_box.canvas:
-            Color(0.06, 0.07, 0.09, 1)
+            Color(1, 1, 1, 1)
+            self.base_map = Rectangle(pos=self.map_box.pos, size=self.map_box.size)
+            Color(0.06, 0.07, 0.09, 0.75)
             self.grid = [Line(points=[0,0,0,0], width=1) for _ in range(13)]
             Color(0.95, 0.72, 0.08, 1)
             self.plane = Triangle(points=[0,0,0,0,0,0])
@@ -684,13 +679,27 @@ class MovingMapScreen(BoxLayout):
         self.map_box.bind(size=lambda *_: self.redraw())
         self.map_box.bind(pos=lambda *_: self.redraw())
 
+    def _tile_loaded(self, path, key):
+        try:
+            self.base_map.texture = CoreImage(path).texture
+            self.last_tile_key = key
+        except Exception as exc:
+            print("Map tile error:", exc)
+
     def update(self, data):
         if data["lat"] or data["lon"]:
             p = (data["lat"], data["lon"])
-            if not self.trail or p != self.trail[-1]: self.trail.append(p)
-            self.trail = self.trail[-400:]
+            if not self.trail or p != self.trail[-1]:
+                self.trail.append(p)
+                self.trail = self.trail[-400:]
         if data["connected"]:
-            self.status.text = "CONNECTED  %.5f, %.5f | %.0f ft | %.0f kt | %03.0f°" % (data["lat"], data["lon"], data["altitude"], data["speed"], data["heading"])
+            self.status.text = "CONNECTED  %.5f, %.5f | %.0f ft | %.0f kt | %03.0f° | © OpenStreetMap contributors" % (data["lat"], data["lon"], data["altitude"], data["speed"], data["heading"])
+            if self.tile_cache:
+                z = 9
+                x, y = self.tile_cache.tile_xy(data["lat"], data["lon"], z)
+                key = f"{z}_{x}_{y}"
+                if key != self.last_tile_key:
+                    self.tile_cache.request(data["lat"], data["lon"], z, self._tile_loaded)
         else:
             self.status.text = "Waiting for Aerofly — enable Send flight data to FSWidgets Apps"
         self.redraw()
@@ -698,6 +707,8 @@ class MovingMapScreen(BoxLayout):
     def redraw(self):
         w, h = self.map_box.size
         cx, cy = self.map_box.x + w/2, self.map_box.y + h/2
+        self.base_map.pos = (cx - min(w,h)/2, cy - min(w,h)/2)
+        self.base_map.size = (min(w,h), min(w,h))
         step = max(35, min(w,h)/7)
         for i, line in enumerate(self.grid):
             x = cx + (i-6)*step
@@ -715,6 +726,7 @@ class MovingMapScreen(BoxLayout):
         lx,ly=cx+math.sin(hdg+2.4)*9,cy+math.cos(hdg+2.4)*9
         rx,ry=cx+math.sin(hdg-2.4)*9,cy+math.cos(hdg-2.4)*9
         self.plane.points=[fx,fy,lx,ly,rx,ry]
+
 
 class MyFlightScreen(BoxLayout):
     def __init__(self, **kwargs):
@@ -931,6 +943,13 @@ class AeroflyATCApp(App):
         self.traffic_engine = TrafficEngine()
         self.airports = AirportDatabase()
         self.terrain = TerrainWarningEngine()
+        self.airspace = AirspaceStore(self.user_data_dir)
+        self.airspace.load()
+        self.elevation = SRTMElevation(self.user_data_dir)
+        self.cabin = CabinCrewEngine()
+        self.map_tiles = OSMTileCache(self.user_data_dir)
+        self.navdata = AirportData(self.user_data_dir)
+        self.navdata.load_local()
         self.aerofly = AeroflyTCPConnector(self.receiver)
         self.aerofly.start("127.0.0.1")
 
@@ -942,7 +961,7 @@ class AeroflyATCApp(App):
         panel.add_widget(flight_tab)
 
         map_tab = TabbedPanelItem(text="Map")
-        self.map_screen = MovingMapScreen(self.receiver)
+        self.map_screen = MovingMapScreen(self.receiver, self.map_tiles)
         map_tab.add_widget(self.map_screen)
         panel.add_widget(map_tab)
 
@@ -979,6 +998,15 @@ class AeroflyATCApp(App):
         ops.add_widget(wx_row)
         self.wx_status = Label(text="Weather: not loaded", size_hint_y=None, height=70)
         ops.add_widget(self.wx_status)
+        airspace_btn = Button(text="LOAD LOCAL OPENAIR AIRSPACE", size_hint_y=None, height=48)
+        airspace_btn.bind(on_press=lambda *_: self.load_airspace())
+        ops.add_widget(airspace_btn)
+        nav_btn = Button(text="UPDATE WORLD AIRPORT DATABASE", size_hint_y=None, height=48)
+        nav_btn.bind(on_press=lambda *_: self.update_navdata())
+        ops.add_widget(nav_btn)
+        cabin_btn = Button(text="CALL CABIN CREW", size_hint_y=None, height=48)
+        cabin_btn.bind(on_press=lambda *_: self.call_cabin_crew("Please report cabin status."))
+        ops.add_widget(cabin_btn)
         atis_btn = Button(text="GENERATE ATIS", size_hint_y=None, height=48)
         atis_btn.bind(on_press=self.generate_atis)
         ops.add_widget(atis_btn)
@@ -1009,10 +1037,13 @@ class AeroflyATCApp(App):
         if terrain_alerts and hasattr(self, "ops_status"): self.ops_status.text += "\\nWARNING: " + " | ".join(terrain_alerts)
         alerts = self.traffic_engine.conflict(data, traffic)
         if alerts and hasattr(self, "ops_status"): self.ops_status.text += "\\nTRAFFIC: " + " | ".join(alerts)
+        announcement = self.cabin.update(data.get("phase"))
+        if announcement:
+            speak_atc(announcement, region_voice_locale(data.get("lat"), data.get("lon")))
         atc_msg = self.atc_controller.generate(data)
         if atc_msg and hasattr(self, "ops_status"):
             self.ops_status.text += "\\nATC: " + atc_msg
-            speak_atc(self.audio_engine.radio_effect_text(atc_msg))
+            speak_atc(self.audio_engine.radio_effect_text(atc_msg), region_voice_locale(data.get("lat"), data.get("lon")))
         if hasattr(self, "map_screen"):
             self.map_screen.update(data)
         if hasattr(self, "ops_status"):
@@ -1023,6 +1054,23 @@ class AeroflyATCApp(App):
     def on_pause(self):
         return True
 
+
+    def load_airspace(self):
+        count = self.airspace.load()
+        if hasattr(self, "ops_status"):
+            self.ops_status.text = "Loaded %d OpenAir airspace definitions from %s" % (count, self.airspace.base_dir)
+
+    def update_navdata(self):
+        if hasattr(self, "ops_status"):
+            self.ops_status.text = "Updating public-domain OurAirports database..."
+        self.navdata.update(lambda count: setattr(self.ops_status, "text", "Airport database updated: %d records" % count))
+
+    def call_cabin_crew(self, request):
+        response = self.cabin.call_reply(request)
+        data = self.receiver.snapshot()
+        speak_atc(response, region_voice_locale(data.get("lat"), data.get("lon")))
+        if hasattr(self, "ops_status"):
+            self.ops_status.text = "CABIN: " + response
 
     def load_weather(self, _=None):
         def worker():
