@@ -18,6 +18,9 @@ from kivy.uix.gridlayout import GridLayout
 from kivy.uix.label import Label
 from kivy.uix.tabbedpanel import TabbedPanel, TabbedPanelItem
 from kivy.uix.textinput import TextInput
+from kivy.uix.image import Image
+from kivy.uix.scrollview import ScrollView
+from kivy.uix.spinner import Spinner
 from kivy.graphics import Color, Line, Triangle, Rectangle
 from aviation_features import AirspaceStore, SRTMElevation, CabinCrewEngine, OSMTileCache, AirportData, region_voice_locale
 
@@ -1383,13 +1386,8 @@ class AeroflyATCApp(App):
         self.copilot.update(data)
         if hasattr(self, "experience_screen"):
             pass
-        if hasattr(self, "map_screen"):
-            self.map_screen.update(data)
         if hasattr(self, "ops_status"):
             self.ops_status.text = "PHASE: %s\\nCALLSIGN: %s\\nALT: %.0f ft\\nGS: %.0f kt\\nVS: %.0f fpm\\nHDG: %03.0f°\\nSQUAWK: %s\\n\\nEvents: %d" % (data.get("phase", "UNKNOWN"), data.get("callsign", "N/A"), data.get("altitude", 0), data.get("speed", 0), data.get("vertical_speed", 0), data.get("heading", 0), data.get("squawk", "2000"), len(self.flight_state.events))
-        if hasattr(self, "map_screen"):
-            self.map_screen.update(data)
-
     def on_pause(self):
         return True
 
