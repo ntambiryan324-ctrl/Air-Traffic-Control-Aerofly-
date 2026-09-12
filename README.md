@@ -59,3 +59,20 @@ Sources:
 - OurAirports: https://ourairports.com/data/
 - USGS/NASA SRTM: https://www.usgs.gov/centers/eros/science/usgs-eros-archive-digital-elevation-shuttle-radar-topography-mission-srtm-1
 - OpenAir format reference: https://github.com/openAIP/openaip-openair-parser
+
+
+## Flight Experience Suite v1.4
+Inspired by feature categories users expect from modern flight-sim companions, without copying proprietary code, assets, or paid chart data.
+
+Added locally:
+- Flight briefing screen
+- Top-of-descent calculation
+- Basic stabilized-approach assessment
+- Flight performance scoring
+- Phase checklists
+- Scenario launcher for go-around, diversion, radio failure and weather
+- Stateful Copilot clearance monitoring
+- Clearance deviation and handoff awareness
+- AFK radio handling and shared ATC/Copilot transcript
+
+Design references researched: Navigraph's moving maps, flight planning, navigation data and telemetry concepts; SayIntentions.AI's context-aware ATC, Copilot, cabin/ground operations, dynamic routing, CPDLC/ACARS, checklists and PocketSky mobile monitoring concepts. These are feature inspirations only; the implementation uses this project's own code and public/open data where available.
