@@ -916,49 +916,84 @@ class CommsScreen(BoxLayout):
 
 
 class Copilot:
-    """Local first officer that can handle simulated ATC while the pilot is AFK."""
+    """Stateful local first officer for simulated ATC, monitoring and AFK comms."""
     def __init__(self, app):
         self.app = app
         self.afk_mode = False
         self.last_action = ""
         self.last_phase = None
+        self.active_clearance = {}
+        self.last_handoff = None
+        self.last_tod_notice = 0.0
+
+    def _log(self, speaker, message):
+        self.app.comms_log_message(speaker, message)
 
     def set_afk(self, enabled):
         self.afk_mode = bool(enabled)
-        self.app.comms_log_message("COPILOT", "AFK COMMS " + ("ENABLED" if enabled else "DISABLED"))
+        self._log("COPILOT", "AFK COMMS " + ("ENABLED" if enabled else "DISABLED"))
+
+    def _speak(self, message, data):
+        nearest = self.app.navdata.nearest(data.get("lat", 0), data.get("lon", 0))
+        country = nearest.get("iso_country") if nearest else None
+        threading.Thread(target=speak_atc, args=(message, region_voice_locale(data.get("lat"), data.get("lon"), country)), daemon=True).start()
+
+    def observe_atc(self, message, data):
+        text = str(message)
+        lower = text.lower()
+        self.active_clearance = {"raw": text, "controller": self.app.atc_controller.controller, "frequency": self.app.atc_controller.frequency, "time": time.time()}
+        m = re.search(r"\\b([0-7]{4})\\b", text) if "squawk" in lower else None
+        if m: self.active_clearance["squawk"] = m.group(1)
+        m = re.search(r"heading\\s+(?:of\\s+)?(\\d{1,3})", lower)
+        if m: self.active_clearance["heading"] = int(m.group(1)) % 360
+        m = re.search(r"flight level\\s+(\\d{2,3})", lower)
+        if m: self.active_clearance["altitude_ft"] = int(m.group(1)) * 100
+        else:
+            m = re.search(r"(?:climb|descend)(?: and maintain)?\\s+(\\d{3,5})", lower)
+            if m: self.active_clearance["altitude_ft"] = int(m.group(1))
+
+    def _reply_for(self, message, data):
+        lower = str(message).lower()
+        cs = data.get("callsign") or self.app.atc_controller.callsign or "aircraft"
+        if "go around" in lower or "go-around" in lower: return "%s, going around." % cs
+        if "cleared for takeoff" in lower: return "%s, cleared for takeoff." % cs
+        if "contact " in lower or "switch" in lower: return "%s, switching." % cs
+        if "hold position" in lower or "hold short" in lower: return "%s, holding position." % cs
+        if any(x in lower for x in ("maintain", "climb", "descend", "heading", "taxi", "line up")): return "%s, wilco." % cs
+        return "%s, copied." % cs
 
     def handle_atc(self, message, data):
-        lower = str(message).lower()
-        callsign = data.get("callsign") or self.app.atc_controller.callsign or "aircraft"
-        if "go around" in lower:
-            reply = "%s, going around." % callsign
-        elif "cleared for takeoff" in lower:
-            reply = "%s, cleared for takeoff." % callsign
-        elif "contact " in lower:
-            reply = "%s, switching." % callsign
-        elif any(x in lower for x in ("maintain", "climb", "descend", "heading")):
-            reply = "%s, wilco." % callsign
-        else:
-            reply = "%s, copied." % callsign
-        self.app.comms_log_message("COPILOT", reply)
-        country = None
-        nearest = self.app.navdata.nearest(data.get("lat", 0), data.get("lon", 0))
-        if nearest:
-            country = nearest.get("iso_country")
-        threading.Thread(target=speak_atc, args=(reply, region_voice_locale(data.get("lat"), data.get("lon"), country)), daemon=True).start()
+        self.observe_atc(message, data)
+        reply = self._reply_for(message, data)
+        self._log("COPILOT", reply)
+        self._speak(reply, data)
 
-    def update(self, data, atc_message=""):
-        if not self.afk_mode:
-            return
+    def monitor(self, data):
         phase = data.get("phase")
         if phase != self.last_phase:
             self.last_phase = phase
-            self.app.comms_log_message("COPILOT", "Flight phase changed to %s." % phase)
-        if atc_message and atc_message != self.last_action:
+            self._log("COPILOT", "Flight phase: %s." % phase)
+        controller = self.app.atc_controller.controller
+        freq = self.app.atc_controller.frequency
+        if self.last_handoff != (controller, freq):
+            self.last_handoff = (controller, freq)
+            if phase not in ("PARKED", "NO TELEMETRY"): self._log("COPILOT", "Now with %s on %s." % (controller.title(), freq))
+        target_alt = self.active_clearance.get("altitude_ft")
+        if target_alt and data.get("connected") and abs(float(data.get("altitude", 0)) - target_alt) > 300:
+            self._log("COPILOT", "Captain, altitude deviation from the last assigned altitude.")
+        target_heading = self.active_clearance.get("heading")
+        if target_heading is not None and data.get("connected"):
+            delta = abs((float(data.get("heading", 0)) - target_heading + 180) % 360 - 180)
+            if delta > 20: self._log("COPILOT", "Captain, heading deviation from the last assigned heading.")
+        if phase == "CENTER" and target_alt and data.get("vertical_speed", 0) >= -100 and time.time() - self.last_tod_notice > 120:
+            self.last_tod_notice = time.time()
+            self._log("COPILOT", "Captain, prepare for descent toward the assigned altitude.")
+
+    def update(self, data, atc_message=""):
+        self.monitor(data)
+        if self.afk_mode and atc_message and atc_message != self.last_action:
             self.last_action = atc_message
             self.handle_atc(atc_message, data)
-
-
 class ScratchpadScreen(BoxLayout):
     def __init__(self, **kwargs):
         super().__init__(orientation="vertical", padding=12, spacing=8, **kwargs)
