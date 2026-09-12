@@ -22,7 +22,7 @@ from kivy.graphics import Color, Line, Triangle, Rectangle
 from aviation_features import AirspaceStore, SRTMElevation, CabinCrewEngine, OSMTileCache, AirportData, region_voice_locale
 
 
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.5.0"
 TELEMETRY_PORTS = (49002, 58585)
 GROQ_MODEL = "openai/gpt-oss-20b"
 
@@ -994,6 +994,69 @@ class Copilot:
         if self.afk_mode and atc_message and atc_message != self.last_action:
             self.last_action = atc_message
             self.handle_atc(atc_message, data)
+class AircraftChecklistCatalog:
+    """Aircraft checklist catalog. Bundled checklist images can be supplied under assets/checklists."""
+    AIRCRAFT = {
+        "A320": "Airbus A320",
+        "B738": "Boeing 737-800",
+        "B77W": "Boeing 777-300ER",
+        "B789": "Boeing 787-9",
+        "C172": "Cessna 172",
+        "DA40": "Diamond DA40",
+        "E190": "Embraer E190",
+        "AT43": "ATR 42-300",
+    }
+
+    def __init__(self, root="assets/checklists"):
+        self.root = root
+
+    def image_for(self, icao):
+        for ext in ("png", "jpg", "jpeg", "webp"):
+            path = os.path.join(self.root, icao.lower() + "." + ext)
+            if os.path.exists(path):
+                return path
+        return None
+
+
+class ChecklistScreen(BoxLayout):
+    def __init__(self, app, **kwargs):
+        super().__init__(orientation="vertical", padding=8, spacing=6, **kwargs)
+        self.app = app
+        self.catalog = AircraftChecklistCatalog()
+        self.aircraft = Spinner(
+            text="Select aircraft",
+            values=tuple(self.catalog.AIRCRAFT.keys()),
+            size_hint_y=None, height=44
+        )
+        self.aircraft.bind(text=self.show_checklist)
+        self.add_widget(self.aircraft)
+
+        self.info = Label(text="Select an aircraft to open its checklist image.", size_hint_y=None, height=40)
+        self.add_widget(self.info)
+
+        scroll = ScrollView()
+        self.image = Image(allow_stretch=True, keep_ratio=True)
+        scroll.add_widget(self.image)
+        self.add_widget(scroll)
+
+        self.source = Label(text="Checklist source: bundled/publicly supplied asset", size_hint_y=None, height=34)
+        self.add_widget(self.source)
+
+    def show_checklist(self, spinner, icao):
+        if icao == "Select aircraft":
+            return
+        path = self.catalog.image_for(icao)
+        if path:
+            self.image.source = path
+            self.image.reload()
+            self.info.text = self.catalog.AIRCRAFT.get(icao, icao)
+            self.source.text = "Checklist source: local asset supplied for %s" % icao
+        else:
+            self.image.source = ""
+            self.info.text = "%s — checklist image not installed yet." % self.catalog.AIRCRAFT.get(icao, icao)
+            self.source.text = "Add a licensed/public-domain checklist image as assets/checklists/%s.png" % icao.lower()
+
+
 class FlightExperienceEngine:
     """Local, deterministic flight-ops features; no external API required."""
     def __init__(self):
@@ -1103,6 +1166,32 @@ class ExperienceScreen(BoxLayout):
     def scenario(self, name):
         self.engine.events.append({"scenario": name, "time": time.time()})
         self.write("SCENARIO ARMED: %s. Copilot will keep this in the session log." % name)
+
+
+class EFBScreen(BoxLayout):
+    def __init__(self, app, **kwargs):
+        super().__init__(orientation="vertical", padding=8, spacing=6, **kwargs)
+        self.app = app
+        self.status = Label(text="EFB / MOVING MAP\nWaiting for telemetry...")
+        self.add_widget(self.status)
+        tools_row = BoxLayout(size_hint_y=None, height=44, spacing=5)
+        for name, fn in (("FOLLOW", self.follow), ("BRIEF", self.brief), ("LOG", self.log)):
+            b = Button(text=name); b.bind(on_press=fn); tools_row.add_widget(b)
+        self.add_widget(tools_row)
+
+    def follow(self, _):
+        d = self.app.receiver.snapshot()
+        self.status.text = "FOLLOW MODE\nAircraft: %s\nLat/Lon: %.5f / %.5f\nHeading: %.0f°\nAlt: %.0f ft" % (
+            d.get("callsign") or "N/A", d.get("lat",0), d.get("lon",0), d.get("heading",0), d.get("altitude",0))
+
+    def brief(self, _):
+        d = self.app.receiver.snapshot()
+        self.status.text = self.app.experience_screen.engine.briefing(d, getattr(self.app, "icao_input", None).text if hasattr(self.app, "icao_input") else "UNKNOWN")
+
+    def log(self, _):
+        d = self.app.receiver.snapshot()
+        self.status.text = "FLIGHT LOG\nPhase: %s\nSpeed: %.0f kt\nAltitude: %.0f ft\nHeading: %.0f°" % (
+            d.get("phase","UNKNOWN"), d.get("speed",0), d.get("altitude",0), d.get("heading",0))
 
 
 class ScratchpadScreen(BoxLayout):
@@ -1242,7 +1331,15 @@ class AeroflyATCApp(App):
         comms_tab.add_widget(self.comms_screen)
         panel.add_widget(comms_tab)
 
-        exp_tab = TabbedPanelItem(text="Experience")
+        efb_tab = TabbedPanelItem(text="EFB")
+        efb_tab.add_widget(EFBScreen(self))
+        panel.add_widget(efb_tab)
+
+        checklist_tab = TabbedPanelItem(text="Checklists")
+        checklist_tab.add_widget(ChecklistScreen(self))
+        panel.add_widget(checklist_tab)
+
+                exp_tab = TabbedPanelItem(text="Experience")
         self.experience_screen = ExperienceScreen(self)\n        exp_tab.add_widget(self.experience_screen)
         panel.add_widget(exp_tab)
 
