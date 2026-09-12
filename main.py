@@ -290,6 +290,66 @@ class TelemetryReceiver:
         self.sockets.clear()
 
 
+
+class FlightStateEngine:
+    """Derives stable simulator state from telemetry without requiring cloud services."""
+    def __init__(self):
+        self.prev = None
+        self.phase = "PARKED"
+        self.last_phase_change = 0
+        self.squawk = "2000"
+        self.events = []
+        self.route = []
+        self.log = []
+
+    def update(self, data):
+        now = time.time()
+        d = dict(data)
+        prev = self.prev
+        vs = 0.0
+        if prev and now > prev["_t"]:
+            vs = (d.get("altitude", 0) - prev.get("altitude", 0)) * 60 / (now - prev["_t"])
+        d["vertical_speed"] = vs
+        speed = float(d.get("speed", 0) or 0)
+        alt = float(d.get("altitude", 0) or 0)
+        on_ground = bool(d.get("on_ground", False))
+        old = self.phase
+        if on_ground and speed < 35:
+            self.phase = "GROUND"
+        elif on_ground and speed >= 35:
+            self.phase = "TAKEOFF"
+        elif not on_ground and vs > 300:
+            self.phase = "DEPARTURE"
+        elif not on_ground and vs < -300:
+            self.phase = "APPROACH"
+        elif not on_ground:
+            self.phase = "CENTER"
+        if self.phase != old:
+            self.events.append({"time": now, "event": old + " -> " + self.phase})
+        if d.get("lat") or d.get("lon"):
+            p = (d.get("lat"), d.get("lon"))
+            if not self.route or p != self.route[-1]:
+                self.route.append(p)
+                self.route = self.route[-1000:]
+        self.log.append({
+            "time": now, "lat": d.get("lat"), "lon": d.get("lon"),
+            "altitude": alt, "speed": speed, "heading": d.get("heading", 0),
+            "vertical_speed": vs, "phase": self.phase
+        })
+        self.log = self.log[-10000:]
+        d["phase"] = self.phase
+        d["squawk"] = self.squawk
+        d["_t"] = now
+        self.prev = d
+        return d
+
+    def snapshot(self):
+        return {
+            "phase": self.phase, "squawk": self.squawk,
+            "events": self.events[-50:], "route": self.route[-1000:],
+            "log": self.log[-10000:]
+        }
+
 class AeroflyTCPConnector:
     def __init__(self, receiver):
         self.receiver = receiver
@@ -700,6 +760,7 @@ class AeroflyATCApp(App):
         self.title = f"AeroflyATC {APP_VERSION}"
         self.receiver = TelemetryReceiver()
         self.receiver.start()
+        self.flight_state = FlightStateEngine()
         self.aerofly = AeroflyTCPConnector(self.receiver)
         self.aerofly.start("127.0.0.1")
 
@@ -729,6 +790,22 @@ class AeroflyATCApp(App):
         connect_box.add_widget(Label(text="Same-device default: 127.0.0.1. Remote device: enter its LAN IPv4 address. UDP 49002 is also accepted.", size_hint_y=None, height=65))
         connect_tab.add_widget(connect_box)
         panel.add_widget(connect_tab)
+
+        ops_tab = TabbedPanelItem(text="Flight Ops")
+        ops = BoxLayout(orientation="vertical", padding=10, spacing=6)
+        self.ops_status = Label(text="Flight state engine starting...", halign="left", valign="top")
+        ops.add_widget(self.ops_status)
+        self.squawk_input = TextInput(text="2000", multiline=False, size_hint_y=None, height=48)
+        ops.add_widget(self.squawk_input)
+        squawk_btn = Button(text="ASSIGN SQUAWK", size_hint_y=None, height=48)
+        squawk_btn.bind(on_press=lambda *_: setattr(self.flight_state, "squawk", self.squawk_input.text.strip() or "2000"))
+        ops.add_widget(squawk_btn)
+        export_btn = Button(text="EXPORT FLIGHT LOG", size_hint_y=None, height=48)
+        export_btn.bind(on_press=self.export_flight_log)
+        ops.add_widget(export_btn)
+        ops_tab.add_widget(ops)
+        panel.add_widget(ops_tab)
+
         comms_tab = TabbedPanelItem(text="Comms")
         comms_tab.add_widget(CommsScreen(self.receiver))
         panel.add_widget(comms_tab)
@@ -741,13 +818,28 @@ class AeroflyATCApp(App):
         return panel
 
     def update_ui(self, _dt):
-        data = self.receiver.snapshot()
+        data = self.flight_state.update(self.receiver.snapshot())
         self.flight_screen.update(data)
+        if hasattr(self, "map_screen"):
+            self.map_screen.update(data)
+        if hasattr(self, "ops_status"):
+            self.ops_status.text = "PHASE: %s\\nCALLSIGN: %s\\nALT: %.0f ft\\nGS: %.0f kt\\nVS: %.0f fpm\\nHDG: %03.0f°\\nSQUAWK: %s\\n\\nEvents: %d" % (data.get("phase", "UNKNOWN"), data.get("callsign", "N/A"), data.get("altitude", 0), data.get("speed", 0), data.get("vertical_speed", 0), data.get("heading", 0), data.get("squawk", "2000"), len(self.flight_state.events))
         if hasattr(self, "map_screen"):
             self.map_screen.update(data)
 
     def on_pause(self):
         return True
+
+    def export_flight_log(self, _=None):
+        try:
+            path = os.path.join(App.get_running_app().user_data_dir, "flight_log.json")
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump(self.flight_state.snapshot(), fh, indent=2)
+            if hasattr(self, "ops_status"):
+                self.ops_status.text += "\\nLog saved: " + path
+        except Exception as exc:
+            if hasattr(self, "ops_status"):
+                self.ops_status.text += "\\nLog export failed: " + str(exc)
 
     def on_stop(self):
         self.aerofly.stop()
