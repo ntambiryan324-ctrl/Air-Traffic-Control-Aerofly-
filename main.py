@@ -294,6 +294,46 @@ class TelemetryReceiver:
 
 
 
+
+class FlightReplay:
+    def __init__(self, state):
+        self.state = state
+        self.index = 0
+        self.playing = False
+
+    def reset(self):
+        self.index = 0
+
+    def step(self):
+        log = self.state.log
+        if not log: return None
+        item = log[min(self.index, len(log)-1)]
+        self.index += 1
+        if self.index >= len(log): self.playing = False
+        return item
+
+class RouteTracker:
+    def __init__(self):
+        self.route = []
+    def add(self, lat, lon, ident=None):
+        self.route.append({"ident": ident, "lat": lat, "lon": lon})
+        self.route = self.route[-200:]
+    def clear(self):
+        self.route = []
+
+class TrafficEngine:
+    """Local synthetic traffic for situational awareness; no external tracking required."""
+    def __init__(self):
+        self.traffic = []
+    def update(self, own):
+        return self.traffic
+    def conflict(self, own, traffic):
+        alerts=[]
+        for ac in traffic:
+            if abs(ac.get("altitude",0)-own.get("altitude",0)) < 1000:
+                alerts.append("%s traffic: altitude proximity." % ac.get("callsign","TRAFFIC"))
+        return alerts
+
 class ATCController:
     """Deterministic controller logic; AI is an optional response layer, not required for safety."""
     def __init__(self):
@@ -855,6 +895,9 @@ class AeroflyATCApp(App):
         self.flight_state = FlightStateEngine()
         self.atc_controller = ATCController()
         self.audio_engine = AudioEngine()
+        self.replay = FlightReplay(self.flight_state)
+        self.route_tracker = RouteTracker()
+        self.traffic_engine = TrafficEngine()
         self.aerofly = AeroflyTCPConnector(self.receiver)
         self.aerofly.start("127.0.0.1")
 
@@ -926,6 +969,10 @@ class AeroflyATCApp(App):
     def update_ui(self, _dt):
         data = self.flight_state.update(self.receiver.snapshot())
         self.flight_screen.update(data)
+        self.route_tracker.add(data.get("lat", 0), data.get("lon", 0), data.get("callsign"))
+        traffic = self.traffic_engine.update(data)
+        alerts = self.traffic_engine.conflict(data, traffic)
+        if alerts and hasattr(self, "ops_status"): self.ops_status.text += "\\nTRAFFIC: " + " | ".join(alerts)
         atc_msg = self.atc_controller.generate(data)
         if atc_msg and hasattr(self, "ops_status"):
             self.ops_status.text += "\\nATC: " + atc_msg
