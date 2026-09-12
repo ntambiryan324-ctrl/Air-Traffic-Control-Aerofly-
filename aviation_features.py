@@ -76,8 +76,10 @@ def parse_openair(text):
             cur["ceiling"] = value
         elif code == "DP":
             parts = value.replace(",", " ").split()
-            if len(parts) >= 2:
-                # Supports DMS/decimal-minute tokens such as 50:00:00N 004:00:00E.
+            # OpenAir commonly writes: latitude hemisphere longitude hemisphere.
+            if len(parts) >= 4 and parts[1].upper() in ("N", "S") and parts[3].upper() in ("E", "W"):
+                cur["points"].append((_coord(parts[0] + parts[1]), _coord(parts[2] + parts[3])))
+            elif len(parts) >= 2:
                 cur["points"].append((_coord(parts[0]), _coord(parts[1])))
     if cur and cur.get("points"):
         result.append(cur)
