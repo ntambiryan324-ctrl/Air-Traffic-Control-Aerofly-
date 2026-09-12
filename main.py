@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import re
 import socket
@@ -111,6 +112,20 @@ def parse_telemetry_packet(data):
 
     if not text:
         return None
+
+    if text.startswith("XGPS"):
+        try:
+            p = text[4:].split(",")
+            sim = p[0].strip()
+            return {"callsign": sim, "sim_name": sim, "lon": float(p[1]), "lat": float(p[2]), "altitude": float(p[3]) * 3.280839895, "heading": float(p[4]) % 360, "speed": float(p[5]) * 1.94384449}
+        except (ValueError, IndexError):
+            pass
+    if text.startswith("XATT"):
+        try:
+            p = text[4:].split(",")
+            return {"sim_name": p[0].strip(), "heading": float(p[1]) % 360, "pitch": float(p[2]), "roll": float(p[3])}
+        except (ValueError, IndexError):
+            pass
 
     try:
         parsed = json.loads(text)
