@@ -1339,11 +1339,12 @@ class AeroflyATCApp(App):
         checklist_tab.add_widget(ChecklistScreen(self))
         panel.add_widget(checklist_tab)
 
-                exp_tab = TabbedPanelItem(text="Experience")
-        self.experience_screen = ExperienceScreen(self)\n        exp_tab.add_widget(self.experience_screen)
+        exp_tab = TabbedPanelItem(text="Experience")
+        self.experience_screen = ExperienceScreen(self)
+        exp_tab.add_widget(self.experience_screen)
         panel.add_widget(exp_tab)
 
-                scratch_tab = TabbedPanelItem(text="Scratchpad")
+        scratch_tab = TabbedPanelItem(text="Scratchpad")
         scratch_tab.add_widget(ScratchpadScreen())
         panel.add_widget(scratch_tab)
 
