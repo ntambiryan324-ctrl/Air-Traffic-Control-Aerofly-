@@ -41,6 +41,7 @@ jobs:
       - name: Static syntax check
         run: |
           python -m py_compile main.py aviation_features.py
+          python -m compileall -q . -x '(^|/)(.git|.buildozer|bin|build|__pycache__)(/|$)'
 
       - name: Build debug APK
         run: |
