@@ -22,7 +22,7 @@ from kivy.graphics import Color, Line, Triangle, Rectangle
 from aviation_features import AirspaceStore, SRTMElevation, CabinCrewEngine, OSMTileCache, AirportData, region_voice_locale
 
 
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.4.0"
 TELEMETRY_PORTS = (49002, 58585)
 GROQ_MODEL = "openai/gpt-oss-20b"
 
@@ -942,14 +942,14 @@ class Copilot:
         text = str(message)
         lower = text.lower()
         self.active_clearance = {"raw": text, "controller": self.app.atc_controller.controller, "frequency": self.app.atc_controller.frequency, "time": time.time()}
-        m = re.search(r"\\b([0-7]{4})\\b", text) if "squawk" in lower else None
+        m = re.search(r"\b([0-7]{4})\b", text) if "squawk" in lower else None
         if m: self.active_clearance["squawk"] = m.group(1)
-        m = re.search(r"heading\\s+(?:of\\s+)?(\\d{1,3})", lower)
+        m = re.search(r"heading\s+(?:of\s+)?(\d{1,3})", lower)
         if m: self.active_clearance["heading"] = int(m.group(1)) % 360
-        m = re.search(r"flight level\\s+(\\d{2,3})", lower)
+        m = re.search(r"flight level\s+(\d{2,3})", lower)
         if m: self.active_clearance["altitude_ft"] = int(m.group(1)) * 100
         else:
-            m = re.search(r"(?:climb|descend)(?: and maintain)?\\s+(\\d{3,5})", lower)
+            m = re.search(r"(?:climb|descend)(?: and maintain)?\s+(\d{3,5})", lower)
             if m: self.active_clearance["altitude_ft"] = int(m.group(1))
 
     def _reply_for(self, message, data):
@@ -994,6 +994,117 @@ class Copilot:
         if self.afk_mode and atc_message and atc_message != self.last_action:
             self.last_action = atc_message
             self.handle_atc(atc_message, data)
+class FlightExperienceEngine:
+    """Local, deterministic flight-ops features; no external API required."""
+    def __init__(self):
+        self.checklist = []
+        self.events = []
+        self.started = time.time()
+
+    def tod(self, altitude_ft, target_ft, groundspeed_kt, descent_fpm=1500):
+        altitude_delta = max(0.0, float(altitude_ft) - float(target_ft))
+        if altitude_delta <= 0 or groundspeed_kt <= 20 or descent_fpm <= 100:
+            return None
+        minutes = altitude_delta / float(descent_fpm)
+        return groundspeed_kt * minutes / 60.0
+
+    def approach_assessment(self, data):
+        if not data.get("connected") or data.get("on_ground"):
+            return "NO APPROACH DATA"
+        issues = []
+        alt = data.get("altitude", 0)
+        vs = data.get("vertical_speed", 0)
+        speed = data.get("speed", 0)
+        if vs < -1200:
+            issues.append("HIGH SINK")
+        if vs > 1000 and alt < 3000:
+            issues.append("HIGH DESCENT PROFILE")
+        if speed > 190 and alt < 3000:
+            issues.append("FAST BELOW 3000")
+        return "STABLE" if not issues else "UNSTABLE: " + ", ".join(issues)
+
+    def score(self, events, deviation_count=0):
+        penalties = min(100, len(events) * 2 + deviation_count * 10)
+        return max(0, 100 - penalties)
+
+    def briefing(self, data, airport="UNKNOWN"):
+        return (
+            "FLIGHT BRIEFING\n"
+            "Airport: %s\n"
+            "Callsign: %s\n"
+            "Altitude: %.0f ft\n"
+            "Speed: %.0f kt\n"
+            "Heading: %03.0f°\n"
+            "Phase: %s"
+        ) % (airport, data.get("callsign") or "N/A", data.get("altitude", 0),
+             data.get("speed", 0), data.get("heading", 0), data.get("phase", "UNKNOWN"))
+
+
+class ExperienceScreen(BoxLayout):
+    def __init__(self, app, **kwargs):
+        super().__init__(orientation="vertical", padding=10, spacing=6, **kwargs)
+        self.app = app
+        self.engine = FlightExperienceEngine()
+        self.status = Label(text="Flight Experience Suite", halign="left", valign="top")
+        self.add_widget(self.status)
+
+        row = BoxLayout(size_hint_y=None, height=44, spacing=5)
+        for title, callback in (
+            ("BRIEFING", self.briefing),
+            ("TOD", self.tod),
+            ("APPROACH", self.approach),
+            ("SCORE", self.score),
+        ):
+            b = Button(text=title)
+            b.bind(on_press=callback)
+            row.add_widget(b)
+        self.add_widget(row)
+
+        checklist_row = BoxLayout(size_hint_y=None, height=44, spacing=5)
+        for item in ("Before Start", "Taxi", "Takeoff", "Approach", "Shutdown"):
+            b = Button(text=item)
+            b.bind(on_press=lambda _, x=item: self.add_checklist(x))
+            checklist_row.add_widget(b)
+        self.add_widget(checklist_row)
+
+        scenario = BoxLayout(size_hint_y=None, height=44, spacing=5)
+        for name in ("Go-Around", "Diversion", "Radio Failure", "Weather"):
+            b = Button(text=name)
+            b.bind(on_press=lambda _, x=name: self.scenario(x))
+            scenario.add_widget(b)
+        self.add_widget(scenario)
+
+        self.log = TextInput(readonly=True, multiline=True)
+        self.add_widget(self.log)
+
+    def write(self, text):
+        self.log.text += str(text) + "\n\n"
+
+    def briefing(self, _):
+        data = self.app.receiver.snapshot()
+        self.write(self.engine.briefing(data, self.app.icao_input.text if hasattr(self.app, "icao_input") else "UNKNOWN"))
+
+    def tod(self, _):
+        data = self.app.receiver.snapshot()
+        value = self.engine.tod(data.get("altitude", 0), 3000, data.get("speed", 0))
+        self.write("TOD: %.1f NM before a 3,000 ft target at 1,500 fpm." % value if value is not None else "TOD unavailable: insufficient telemetry or already below target.")
+
+    def approach(self, _):
+        self.write("APPROACH: " + self.engine.approach_assessment(self.app.receiver.snapshot()))
+
+    def score(self, _):
+        deviations = sum(1 for e in self.app.flight_state.events if "deviation" in str(e).lower())
+        self.write("FLIGHT SCORE: %d/100" % self.engine.score(self.app.flight_state.events, deviations))
+
+    def add_checklist(self, item):
+        self.engine.checklist.append(item)
+        self.write("CHECKLIST: %s started." % item)
+
+    def scenario(self, name):
+        self.engine.events.append({"scenario": name, "time": time.time()})
+        self.write("SCENARIO ARMED: %s. Copilot will keep this in the session log." % name)
+
+
 class ScratchpadScreen(BoxLayout):
     def __init__(self, **kwargs):
         super().__init__(orientation="vertical", padding=12, spacing=8, **kwargs)
@@ -1131,7 +1242,11 @@ class AeroflyATCApp(App):
         comms_tab.add_widget(self.comms_screen)
         panel.add_widget(comms_tab)
 
-        scratch_tab = TabbedPanelItem(text="Scratchpad")
+        exp_tab = TabbedPanelItem(text="Experience")
+        self.experience_screen = ExperienceScreen(self)\n        exp_tab.add_widget(self.experience_screen)
+        panel.add_widget(exp_tab)
+
+                scratch_tab = TabbedPanelItem(text="Scratchpad")
         scratch_tab.add_widget(ScratchpadScreen())
         panel.add_widget(scratch_tab)
 
@@ -1167,6 +1282,9 @@ class AeroflyATCApp(App):
         if atc_msg and hasattr(self, "ops_status"):
             self.ops_status.text += "\\nATC: " + atc_msg
             speak_atc(self.audio_engine.radio_effect_text(atc_msg), region_voice_locale(data.get("lat"), data.get("lon"), country))
+        self.copilot.update(data)
+        if hasattr(self, "experience_screen"):
+            pass
         if hasattr(self, "map_screen"):
             self.map_screen.update(data)
         if hasattr(self, "ops_status"):
