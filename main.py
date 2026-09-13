@@ -8,68 +8,177 @@ import time
 
 from kivy.app import App
 from kivy.clock import Clock
+from kivy.graphics import Color, Ellipse, Line, Rectangle
+from kivy.metrics import dp
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.button import Button
+from kivy.uix.gridlayout import GridLayout
 from kivy.uix.label import Label
-from kivy.uix.screenmanager import Screen, ScreenManager
-from kivy.uix.spinner import Spinner
+from kivy.uix.screenmanager import Screen, ScreenManager, SlideTransition
 from kivy.uix.textinput import TextInput
+from kivy.uix.widget import Widget
 
 
 TELEMETRY_PORT = 58585
+APP_BG = (0.035, 0.055, 0.085, 1)
+CARD = (0.065, 0.095, 0.135, 1)
+CARD2 = (0.085, 0.12, 0.165, 1)
+ACCENT = (0.10, 0.62, 0.95, 1)
+GOOD = (0.15, 0.80, 0.48, 1)
+TEXT = (0.90, 0.94, 0.98, 1)
+MUTED = (0.56, 0.64, 0.73, 1)
+WARN = (1.0, 0.67, 0.20, 1)
 
 
 class Telemetry:
+    """Aerofly FSWidgets-compatible UDP receiver plus JSON test mode.
+
+    Aerofly's mobile FSWidgets stream is plain text, not JSON. The stream
+    contains XGPS and XATT records on UDP port 58585.
+    """
+
     def __init__(self, port=TELEMETRY_PORT):
         self.port = port
         self.data = {
-            "connected": False, "callsign": "UNKNOWN", "lat": 0.0, "lon": 0.0,
-            "altitude": 0.0, "speed": 0.0, "heading": 0.0, "vertical_speed": 0.0,
-            "on_ground": True, "phase": "PARKED", "timestamp": 0.0,
+            "connected": False,
+            "callsign": "UNKNOWN",
+            "lat": 0.0,
+            "lon": 0.0,
+            "altitude": 0.0,
+            "speed": 0.0,
+            "heading": 0.0,
+            "vertical_speed": 0.0,
+            "pitch": 0.0,
+            "bank": 0.0,
+            "on_ground": True,
+            "phase": "WAITING",
+            "timestamp": 0.0,
+            "source_ip": "",
+            "packets": 0,
         }
         self.lock = threading.Lock()
         self.sock = None
         self.running = False
+        self.last_altitude = None
+        self.last_altitude_time = None
+        self.trail = []
 
     def start(self):
         if self.running:
-            return
+            return True
         self.running = True
         threading.Thread(target=self._listen, daemon=True).start()
+        return True
 
     def _listen(self):
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            except OSError:
+                pass
             sock.bind(("0.0.0.0", self.port))
             sock.settimeout(1.0)
             self.sock = sock
         except OSError:
             self.running = False
             return
+
         while self.running:
             try:
-                raw, _ = sock.recvfrom(65535)
-                payload = json.loads(raw.decode("utf-8"))
-                if isinstance(payload, dict):
-                    with self.lock:
-                        self.data.update(payload)
-                        self.data["timestamp"] = time.time()
-                        self.data["connected"] = True
-                        self.data["phase"] = self._phase(self.data)
+                raw, address = sock.recvfrom(65535)
+                self._parse(raw.decode("utf-8", errors="replace"), address[0])
             except socket.timeout:
                 with self.lock:
                     if time.time() - self.data["timestamp"] > 5:
                         self.data["connected"] = False
-            except (ValueError, UnicodeError, OSError):
+            except OSError:
+                break
+            except Exception:
                 continue
+
+    def _parse(self, text, source_ip):
+        for line in text.replace("\r", "").split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                if line.startswith("{"):
+                    payload = json.loads(line)
+                    if isinstance(payload, dict):
+                        with self.lock:
+                            self.data.update(payload)
+                            self.data["source_ip"] = source_ip
+                            self.data["connected"] = True
+                            self.data["timestamp"] = time.time()
+                            self.data["packets"] += 1
+                            self.data["phase"] = self._phase(self.data)
+                    continue
+                if line.startswith("XGPS"):
+                    self._parse_xgps(line, source_ip)
+                elif line.startswith("XATT"):
+                    self._parse_xatt(line, source_ip)
+            except (ValueError, IndexError):
+                continue
+
+    def _parse_xgps(self, line, source_ip):
+        parts = line.split(",")
+        if len(parts) < 5:
+            return
+        values = [float(x) for x in parts[1:]]
+        lon = values[0]
+        lat = values[1]
+        altitude_ft = values[2] * 3.28084
+        speed_kt = values[3] * 1.943844 if len(values) > 3 else 0.0
+        now = time.time()
+        with self.lock:
+            if self.last_altitude is not None and self.last_altitude_time:
+                dt = now - self.last_altitude_time
+                if 0.05 < dt < 5:
+                    self.data["vertical_speed"] = (altitude_ft - self.last_altitude) / dt * 60.0
+            self.last_altitude = altitude_ft
+            self.last_altitude_time = now
+            self.data.update({
+                "lat": lat,
+                "lon": lon,
+                "altitude": altitude_ft,
+                "speed": speed_kt,
+                "source_ip": source_ip,
+                "connected": True,
+                "timestamp": now,
+                "packets": self.data["packets"] + 1,
+            })
+            if len(values) > 4 and abs(values[4]) > 0.01 and self.data["heading"] == 0:
+                self.data["heading"] = values[4] % 360.0
+            self.data["on_ground"] = altitude_ft < 50 and abs(self.data["vertical_speed"]) < 600
+            self.data["phase"] = self._phase(self.data)
+            self.trail.append((lat, lon))
+            if len(self.trail) > 600:
+                self.trail.pop(0)
+
+    def _parse_xatt(self, line, source_ip):
+        parts = line.split(",")
+        if len(parts) < 4:
+            return
+        yaw, pitch, bank = (float(parts[1]), float(parts[2]), float(parts[3]))
+        with self.lock:
+            self.data["heading"] = yaw % 360.0
+            self.data["pitch"] = pitch
+            self.data["bank"] = bank
+            self.data["source_ip"] = source_ip
+            self.data["connected"] = True
+            self.data["timestamp"] = time.time()
+            self.data["packets"] += 1
 
     @staticmethod
     def _phase(d):
-        if d.get("on_ground", True):
-            return "GROUND"
+        if not d.get("connected"):
+            return "WAITING"
         alt = float(d.get("altitude", 0))
         vs = float(d.get("vertical_speed", 0))
+        if d.get("on_ground", False):
+            return "GROUND"
         if alt < 1500 and vs > 200:
             return "DEPARTURE"
         if vs < -300 and alt < 10000:
@@ -80,56 +189,60 @@ class Telemetry:
         with self.lock:
             return dict(self.data)
 
+    def trail_snapshot(self):
+        with self.lock:
+            return list(self.trail)
+
+    def stop(self):
+        self.running = False
+        if self.sock:
+            try:
+                self.sock.close()
+            except OSError:
+                pass
+
 
 class Copilot:
     def __init__(self):
         self.afk = False
         self.clearance = {}
-        self.events = []
         self.last_phase = None
-        self.last_handoff = None
+        self.messages = []
 
-    def observe_atc(self, text, controller, frequency):
-        text = str(text)
-        self.clearance = {
-            "raw": text, "controller": controller, "frequency": frequency,
-            "time": time.time(),
-        }
+    def observe_atc(self, text, controller="ATC", frequency=""):
+        text = str(text).strip()
+        if not text:
+            return
+        self.clearance = {"raw": text, "controller": controller, "frequency": frequency}
         low = text.lower()
-        m = re.search(r"\b([0-7]{4})\b", text) if "squawk" in low else None
-        if m:
-            self.clearance["squawk"] = m.group(1)
-        m = re.search(r"heading\s+(?:of\s+)?(\d{1,3})", low)
-        if m:
-            self.clearance["heading"] = int(m.group(1)) % 360
-        m = re.search(r"flight level\s+(\d{2,3})", low)
-        if m:
-            self.clearance["altitude_ft"] = int(m.group(1)) * 100
+        match = re.search(r"\b([0-7]{4})\b", text) if "squawk" in low else None
+        if match:
+            self.clearance["squawk"] = match.group(1)
+        match = re.search(r"heading\s+(?:of\s+)?(\d{1,3})", low)
+        if match:
+            self.clearance["heading"] = int(match.group(1)) % 360
+        match = re.search(r"flight level\s+(\d{2,3})", low)
+        if match:
+            self.clearance["altitude_ft"] = int(match.group(1)) * 100
         else:
-            m = re.search(r"(?:climb|descend)(?: and maintain)?\s+(\d{3,5})", low)
-            if m:
-                self.clearance["altitude_ft"] = int(m.group(1))
+            match = re.search(r"(?:climb|descend)(?: and maintain)?\s+(\d{3,5})", low)
+            if match:
+                self.clearance["altitude_ft"] = int(match.group(1))
 
-    def monitor(self, d, controller, frequency):
-        messages = []
-        phase = d.get("phase")
+    def monitor(self, data):
+        phase = data.get("phase")
         if phase != self.last_phase:
             self.last_phase = phase
-            messages.append("Flight phase: %s" % phase)
-        handoff = (controller, frequency)
-        if handoff != self.last_handoff:
-            self.last_handoff = handoff
-            if d.get("connected"):
-                messages.append("Now with %s on %s" % (controller, frequency))
+            return "Flight phase: " + str(phase)
         target = self.clearance.get("altitude_ft")
-        if target and d.get("connected") and abs(float(d.get("altitude", 0)) - target) > 300:
-            messages.append("Altitude deviation from last assigned altitude")
+        if target and data.get("connected") and abs(float(data.get("altitude", 0)) - target) > 300:
+            return "Altitude deviation from last assigned altitude"
         heading = self.clearance.get("heading")
-        if heading is not None and d.get("connected"):
-            delta = abs((float(d.get("heading", 0)) - heading + 180) % 360 - 180)
+        if heading is not None and data.get("connected"):
+            delta = abs((float(data.get("heading", 0)) - heading + 180) % 360 - 180)
             if delta > 20:
-                messages.append("Heading deviation from last assigned heading")
-        return messages
+                return "Heading deviation from last assigned heading"
+        return None
 
 
 class FlightOps:
@@ -148,70 +261,256 @@ class FlightOps:
         if float(d.get("vertical_speed", 0)) < -1200:
             issues.append("HIGH SINK")
         if float(d.get("speed", 0)) > 190 and float(d.get("altitude", 0)) < 3000:
-            issues.append("FAST BELOW 3000")
+            issues.append("FAST BELOW 3000"
+)
         return "STABLE" if not issues else "UNSTABLE: " + ", ".join(issues)
 
-    @staticmethod
-    def score(deviations, events):
-        return max(0, 100 - min(100, deviations * 10 + events * 2))
+
+class Card(BoxLayout):
+    def __init__(self, **kwargs):
+        super().__init__(padding=dp(12), spacing=dp(8), **kwargs)
+        with self.canvas.before:
+            Color(*CARD)
+            self._bg = Rectangle(pos=self.pos, size=self.size)
+        self.bind(pos=self._sync_bg, size=self._sync_bg)
+
+    def _sync_bg(self, *_):
+        self._bg.pos = self.pos
+        self._bg.size = self.size
 
 
-class MainScreen(Screen):
+class TitleBar(BoxLayout):
+    def __init__(self, title, subtitle="", **kwargs):
+        super().__init__(orientation="vertical", size_hint_y=None, height=dp(68), padding=(dp(14), dp(8)), **kwargs)
+        self.add_widget(Label(text=title, color=TEXT, font_size="22sp", bold=True, halign="left"))
+        if subtitle:
+            self.add_widget(Label(text=subtitle, color=MUTED, font_size="12sp", halign="left"))
+
+
+class Metric(BoxLayout):
+    def __init__(self, label, value="—", **kwargs):
+        super().__init__(orientation="vertical", padding=(dp(10), dp(7)), **kwargs)
+        self.add_widget(Label(text=label.upper(), color=MUTED, font_size="10sp"))
+        self.value = Label(text=value, color=TEXT, font_size="18sp", bold=True)
+        self.add_widget(self.value)
+
+
+class MovingMap(Widget):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.data = {}
+        self.trail = []
+        self.bind(pos=lambda *_: self.redraw(), size=lambda *_: self.redraw())
+
+    def update(self, data, trail):
+        self.data = data
+        self.trail = trail
+        self.redraw()
+
+    def redraw(self):
+        self.canvas.clear()
+        with self.canvas:
+            Color(0.025, 0.06, 0.08, 1)
+            Rectangle(pos=self.pos, size=self.size)
+            Color(0.10, 0.20, 0.23, 0.7)
+            for x in range(int(self.x), int(self.right), int(dp(50))):
+                Line(points=[x, self.y, x, self.top], width=0.7)
+            for y in range(int(self.y), int(self.top), int(dp(50))):
+                Line(points=[self.x, y, self.right, y], width=0.7)
+
+            lat = float(self.data.get("lat", 0))
+            lon = float(self.data.get("lon", 0))
+            if lat == 0 and lon == 0:
+                Color(*MUTED)
+                return
+
+            def project(p):
+                plat, plon = p
+                scale = min(self.width, self.height) / 0.16
+                return (
+                    self.center_x + (plon - lon) * scale,
+                    self.center_y + (plat - lat) * scale,
+                )
+
+            if len(self.trail) > 1:
+                Color(0.15, 0.65, 0.95, 0.9)
+                points = []
+                for p in self.trail:
+                    x, y = project(p)
+                    if self.x - 100 < x < self.right + 100 and self.y - 100 < y < self.top + 100:
+                        points.extend([x, y])
+                if len(points) >= 4:
+                    Line(points=points, width=2.0)
+
+            px, py = self.center
+            heading = math.radians(float(self.data.get("heading", 0)))
+            size = dp(18)
+            nose = (px + math.sin(heading) * size, py + math.cos(heading) * size)
+            left = (px + math.sin(heading + 2.45) * size * 0.75, py + math.cos(heading + 2.45) * size * 0.75)
+            right = (px + math.sin(heading - 2.45) * size * 0.75, py + math.cos(heading - 2.45) * size * 0.75)
+            Color(*ACCENT)
+            Line(points=[nose[0], nose[1], left[0], left[1], right[0], right[1], nose[0], nose[1]], width=2.4)
+            Color(0.2, 0.7, 1, 0.22)
+            Line(circle=(px, py, dp(55)), width=1.0)
+
+
+class MyFlightScreen(Screen):
     def __init__(self, app_ref, **kwargs):
         super().__init__(**kwargs)
         self.app_ref = app_ref
-        root = BoxLayout(orientation="vertical", padding=8, spacing=6)
-        self.status = Label(text="Aerofly Flight Companion", halign="left", valign="top")
-        root.add_widget(self.status)
+        root = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(8))
+        root.add_widget(TitleBar("MY FLIGHT", "Aerofly Flight Companion"))
+        self.connection = Label(text="●  WAITING FOR AEROFLY", color=WARN, size_hint_y=None, height=dp(28))
+        root.add_widget(self.connection)
 
-        controls = BoxLayout(size_hint_y=None, height=44, spacing=5)
-        self.afk = Button(text="AFK COMMS: OFF")
-        self.afk.bind(on_press=self.toggle_afk)
-        controls.add_widget(self.afk)
-        self.listen = Button(text="Telemetry: START")
-        self.listen.bind(on_press=self.start_telemetry)
-        controls.add_widget(self.listen)
-        root.add_widget(controls)
+        card = Card(orientation="vertical", size_hint_y=None, height=dp(118))
+        row = BoxLayout()
+        self.phase = Label(text="PARKED", color=ACCENT, font_size="22sp", bold=True)
+        row.add_widget(self.phase)
+        self.callsign = Label(text="UNKNOWN", color=TEXT, font_size="20sp", bold=True, halign="right")
+        row.add_widget(self.callsign)
+        card.add_widget(row)
+        self.summary = Label(text="Enable Aerofly flight-data sharing to begin.", color=MUTED, halign="left")
+        card.add_widget(self.summary)
+        root.add_widget(card)
 
-        self.log = TextInput(readonly=True, multiline=True)
-        root.add_widget(self.log)
-        self.add_widget(root)
-
-    def toggle_afk(self, _):
-        self.app_ref.copilot.afk = not self.app_ref.copilot.afk
-        self.afk.text = "AFK COMMS: %s" % ("ON" if self.app_ref.copilot.afk else "OFF")
-
-    def start_telemetry(self, _):
-        self.app_ref.telemetry.start()
-        self.listen.text = "Telemetry: LISTENING"
-
-    def add_log(self, text):
-        self.log.text += "[%s] %s\n" % (time.strftime("%H:%M:%S"), text)
-
-
-class EFBScreen(Screen):
-    def __init__(self, app_ref, **kwargs):
-        super().__init__(**kwargs)
-        self.app_ref = app_ref
-        root = BoxLayout(orientation="vertical", padding=8, spacing=6)
-        self.info = Label(text="EFB / MOVING MAP\nWaiting for telemetry...")
-        root.add_widget(self.info)
+        metrics = GridLayout(cols=3, size_hint_y=None, height=dp(150), spacing=dp(7))
+        self.alt = Metric("Altitude")
+        self.spd = Metric("Speed")
+        self.hdg = Metric("Heading")
+        self.vs = Metric("V/S")
+        self.pos = Metric("Position")
+        self.tod = Metric("TOD")
+        for item in (self.alt, self.spd, self.hdg, self.vs, self.pos, self.tod):
+            metrics.add_widget(Card(children=[item], orientation="vertical"))
+        root.add_widget(metrics)
+        root.add_widget(Label(text="LIVE TELEMETRY  •  UDP 58585", color=MUTED, font_size="10sp", size_hint_y=None, height=dp(22)))
         self.add_widget(root)
 
     def refresh(self, d):
-        self.info.text = (
-            "EFB / FLIGHT FOLLOW\n"
-            "Callsign: %s\nPosition: %.5f, %.5f\n"
-            "Altitude: %.0f ft\nSpeed: %.0f kt\n"
-            "Heading: %03.0f°\nPhase: %s\nTelemetry: %s"
-        ) % (
-            d.get("callsign", "UNKNOWN"), d.get("lat", 0), d.get("lon", 0),
-            d.get("altitude", 0), d.get("speed", 0), d.get("heading", 0),
-            d.get("phase", "UNKNOWN"), "CONNECTED" if d.get("connected") else "WAITING",
-        )
+        connected = d.get("connected", False)
+        self.connection.text = "●  AEROFLY CONNECTED" if connected else "●  WAITING FOR AEROFLY"
+        self.connection.color = GOOD if connected else WARN
+        self.phase.text = d.get("phase", "WAITING")
+        self.callsign.text = d.get("callsign", "UNKNOWN")
+        self.alt.value.text = "%.0f ft" % d.get("altitude", 0)
+        self.spd.value.text = "%.0f kt" % d.get("speed", 0)
+        self.hdg.value.text = "%03.0f°" % d.get("heading", 0)
+        self.vs.value.text = "%+.0f fpm" % d.get("vertical_speed", 0)
+        self.pos.value.text = "%.3f / %.3f" % (d.get("lat", 0), d.get("lon", 0))
+        tod = FlightOps.tod_nm(d.get("altitude", 0), 3000, d.get("speed", 0))
+        self.tod.value.text = "%.1f NM" % tod if tod is not None else "—"
+        self.summary.text = "Source %s  •  %s packets" % (d.get("source_ip") or "unknown", d.get("packets", 0))
 
 
-class ChecklistScreen(Screen):
+class MapScreen(Screen):
+    def __init__(self, app_ref, **kwargs):
+        super().__init__(**kwargs)
+        self.app_ref = app_ref
+        root = BoxLayout(orientation="vertical")
+        root.add_widget(TitleBar("MAP", "Moving map • flight path • heading vector"))
+        self.map = MovingMap()
+        root.add_widget(self.map)
+        self.map_label = Label(text="Waiting for position", color=TEXT, size_hint_y=None, height=dp(34))
+        root.add_widget(self.map_label)
+        self.add_widget(root)
+
+    def refresh(self, d, trail):
+        self.map.update(d, trail)
+        if d.get("connected"):
+            self.map_label.text = "%.5f  %.5f   •   %03.0f°   •   %.0f ft" % (
+                d.get("lat", 0), d.get("lon", 0), d.get("heading", 0), d.get("altitude", 0))
+        else:
+            self.map_label.text = "Waiting for Aerofly telemetry on UDP 58585"
+
+
+class CommsScreen(Screen):
+    def __init__(self, app_ref, **kwargs):
+        super().__init__(**kwargs)
+        self.app_ref = app_ref
+        root = BoxLayout(orientation="vertical", spacing=dp(6), padding=dp(8))
+        root.add_widget(TitleBar("COMMS", "ATC • COPILOT • CABIN"))
+
+        top = Card(size_hint_y=None, height=dp(54))
+        top.add_widget(Label(text="COM1  118.000", color=TEXT, font_size="18sp", bold=True))
+        afk = Button(text="COPILOT AFK: OFF", size_hint_x=None, width=dp(145))
+        afk.bind(on_press=self.toggle_afk)
+        self.afk_button = afk
+        top.add_widget(afk)
+        root.add_widget(top)
+
+        self.chat = TextInput(readonly=True, multiline=True, text="ATC COMMS READY\n\nNo radio traffic received yet.", background_color=CARD, foreground_color=TEXT)
+        root.add_widget(self.chat)
+
+        compose = BoxLayout(size_hint_y=None, height=dp(54), spacing=dp(6))
+        self.input = TextInput(hint_text="Type pilot transmission…", multiline=False)
+        compose.add_widget(self.input)
+        mic = Button(text="MIC", size_hint_x=None, width=dp(58))
+        mic.bind(on_press=lambda *_: self.append("COPILOT", "Speech-to-text interface ready; Android microphone integration will be enabled in the next audio build."))
+        compose.add_widget(mic)
+        send = Button(text="SEND", size_hint_x=None, width=dp(68))
+        send.bind(on_press=self.send)
+        compose.add_widget(send)
+        root.add_widget(compose)
+        self.add_widget(root)
+
+    def toggle_afk(self, *_):
+        self.app_ref.copilot.afk = not self.app_ref.copilot.afk
+        self.afk_button.text = "COPILOT AFK: %s" % ("ON" if self.app_ref.copilot.afk else "OFF")
+
+    def send(self, *_):
+        text = self.input.text.strip()
+        if text:
+            self.append("PILOT", text)
+            self.input.text = ""
+            self.app_ref.copilot.observe_atc(text, "SIMULATED ATC", "118.000")
+
+    def append(self, speaker, text):
+        self.chat.text += "\n\n%s\n%s" % (speaker, text)
+
+
+class ScratchpadScreen(Screen):
+    def __init__(self, app_ref, **kwargs):
+        super().__init__(**kwargs)
+        self.app_ref = app_ref
+        root = BoxLayout(orientation="vertical", spacing=dp(7), padding=dp(8))
+        root.add_widget(TitleBar("SCRATCHPAD", "Quick cockpit notes"))
+        bar = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(6))
+        save = Button(text="SAVE")
+        save.bind(on_press=self.save)
+        clear = Button(text="CLEAR")
+        clear.bind(on_press=self.clear)
+        bar.add_widget(save)
+        bar.add_widget(clear)
+        root.add_widget(bar)
+        self.note = TextInput(multiline=True, hint_text="ATC clearance, squawk, frequencies, gates, reminders…", background_color=CARD, foreground_color=TEXT, cursor_color=ACCENT)
+        root.add_widget(self.note)
+        self.add_widget(root)
+        Clock.schedule_once(lambda *_: self.load(), 0)
+
+    def path(self):
+        return os.path.join(self.app_ref.user_data_dir, "scratchpad.txt")
+
+    def load(self):
+        try:
+            with open(self.path(), "r", encoding="utf-8") as f:
+                self.note.text = f.read()
+        except OSError:
+            pass
+
+    def save(self, *_):
+        try:
+            with open(self.path(), "w", encoding="utf-8") as f:
+                f.write(self.note.text)
+        except OSError:
+            pass
+
+    def clear(self, *_):
+        self.note.text = ""
+        self.save()
+
+
+class ChecklistsScreen(Screen):
     AIRCRAFT = {
         "A320": "Airbus A320",
         "B738": "Boeing 737-800",
@@ -225,84 +524,101 @@ class ChecklistScreen(Screen):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        root = BoxLayout(orientation="vertical", padding=8, spacing=6)
-        self.selector = Spinner(text="Select aircraft", values=tuple(self.AIRCRAFT))
-        self.selector.bind(text=self.select)
+        root = BoxLayout(orientation="vertical", spacing=dp(7), padding=dp(8))
+        root.add_widget(TitleBar("CHECKLISTS", "Select an aircraft"))
+        self.selector = TextInput(text="A320", multiline=False, size_hint_y=None, height=dp(45), hint_text="Aircraft code")
         root.add_widget(self.selector)
-        self.info = Label(text="Select an aircraft. Licensed/public-domain checklist assets may be placed in assets/checklists/.")
+        self.info = TextInput(readonly=True, multiline=True, text="Checklist assets are loaded from assets/checklists/. Only licensed, public-domain or user-provided checklists should be added.", background_color=CARD, foreground_color=TEXT)
         root.add_widget(self.info)
+        load = Button(text="LOAD CHECKLIST", size_hint_y=None, height=dp(48))
+        load.bind(on_press=self.load_checklist)
+        root.add_widget(load)
         self.add_widget(root)
 
-    def select(self, _, aircraft):
-        if aircraft == "Select aircraft":
-            return
-        filename = os.path.join("assets", "checklists", aircraft.lower() + ".txt")
-        if os.path.exists(filename):
-            with open(filename, "r", encoding="utf-8") as handle:
-                self.info.text = handle.read()
-        else:
-            self.info.text = (
-                "%s\n\nNo checklist asset installed.\n"
-                "Add a licensed/public-domain checklist as %s."
-            ) % (self.AIRCRAFT[aircraft], filename)
+    def load_checklist(self, *_):
+        code = self.selector.text.strip().lower()
+        filename = os.path.join("assets", "checklists", code + ".txt")
+        try:
+            with open(filename, "r", encoding="utf-8") as f:
+                self.info.text = f.read()
+        except OSError:
+            name = self.AIRCRAFT.get(code.upper(), code.upper())
+            self.info.text = "%s\n\nNo checklist asset installed.\nExpected: %s" % (name, filename)
 
 
-class ExperienceScreen(Screen):
+class MoreScreen(Screen):
     def __init__(self, app_ref, **kwargs):
         super().__init__(**kwargs)
         self.app_ref = app_ref
-        root = BoxLayout(orientation="vertical", padding=8, spacing=6)
-        self.info = Label(text="Flight Experience")
-        root.add_widget(self.info)
-        buttons = BoxLayout(size_hint_y=None, height=44, spacing=5)
-        tod = Button(text="TOD")
-        tod.bind(on_press=self.tod)
-        approach = Button(text="APPROACH")
-        approach.bind(on_press=self.approach)
-        buttons.add_widget(tod)
-        buttons.add_widget(approach)
-        root.add_widget(buttons)
+        root = BoxLayout(orientation="vertical", spacing=dp(7), padding=dp(8))
+        root.add_widget(TitleBar("MORE", "Connection and app settings"))
+        card = Card(orientation="vertical", size_hint_y=None, height=dp(230))
+        card.add_widget(Label(text="AEROFLY CONNECTION", color=TEXT, font_size="17sp", bold=True))
+        card.add_widget(Label(text="UDP PORT  58585\n\nAerofly FS: Settings → Miscellaneous → Send flight data to FSWidgets apps\n\nPoint Aerofly at this tablet's IPv4 address and port 58585. Both apps can run side-by-side on the same Android tablet.\n\nThe receiver accepts Aerofly's XGPS/XATT plain-text stream.", color=MUTED, halign="left"))
+        root.add_widget(card)
+        self.status = Label(text="", color=MUTED)
+        root.add_widget(self.status)
         self.add_widget(root)
 
-    def tod(self, _):
-        d = self.app_ref.telemetry.snapshot()
-        value = FlightOps.tod_nm(d["altitude"], 3000, d["speed"])
-        self.info.text = "TOD: %.1f NM to 3,000 ft" % value if value is not None else "TOD unavailable"
-
-    def approach(self, _):
-        self.info.text = "APPROACH: " + FlightOps.approach_status(self.app_ref.telemetry.snapshot())
+    def refresh(self, d):
+        self.status.text = "Receiver: %s   •   Source: %s   •   Packets: %s" % (
+            "CONNECTED" if d.get("connected") else "WAITING",
+            d.get("source_ip") or "—",
+            d.get("packets", 0))
 
 
 class AeroflyCompanion(App):
     def build(self):
         self.telemetry = Telemetry()
         self.copilot = Copilot()
-        manager = ScreenManager()
-        main = MainScreen(self, name="main")
-        self.efb = EFBScreen(self, name="efb")
-        checklist = ChecklistScreen(name="checklists")
-        experience = ExperienceScreen(self, name="experience")
-        manager.add_widget(main)
-        manager.add_widget(self.efb)
-        manager.add_widget(checklist)
-        manager.add_widget(experience)
-        Clock.schedule_interval(self.tick, 0.5)
-        return manager
+        self.telemetry.start()
+
+        manager = ScreenManager(transition=SlideTransition(duration=0.12))
+        self.screens = {}
+        for name, screen in (
+            ("flight", MyFlightScreen(self, name="flight")),
+            ("map", MapScreen(self, name="map")),
+            ("comms", CommsScreen(self, name="comms")),
+            ("scratch", ScratchpadScreen(self, name="scratch")),
+            ("checklists", ChecklistsScreen(name="checklists")),
+            ("more", MoreScreen(self, name="more")),
+        ):
+            self.screens[name] = screen
+            manager.add_widget(screen)
+
+        nav = BoxLayout(orientation="vertical")
+        nav.add_widget(manager)
+        bottom = BoxLayout(size_hint_y=None, height=dp(62), spacing=dp(3), padding=(dp(4), dp(4)))
+        for name, label in (
+            ("flight", "MY FLIGHT"),
+            ("map", "MAP"),
+            ("comms", "COMMS"),
+            ("scratch", "SCRATCH"),
+            ("checklists", "CHECKLISTS"),
+            ("more", "MORE"),
+        ):
+            button = Button(text=label, background_normal="", background_color=CARD2, color=TEXT, font_size="10sp")
+            button.bind(on_press=lambda _, n=name: self.go(n))
+            bottom.add_widget(button)
+        nav.add_widget(bottom)
+        self.manager = manager
+        Clock.schedule_interval(self.tick, 0.25)
+        return nav
+
+    def go(self, name):
+        self.manager.current = name
 
     def tick(self, _dt):
         d = self.telemetry.snapshot()
-        messages = self.copilot.monitor(d, "GROUND", "118.000")
-        if messages:
-            self.root.get_screen("main").add_log("COPILOT: " + " | ".join(messages))
-        self.efb.refresh(d)
+        self.screens["flight"].refresh(d)
+        self.screens["map"].refresh(d, self.telemetry.trail_snapshot())
+        self.screens["more"].refresh(d)
+        event = self.copilot.monitor(d)
+        if event and self.copilot.afk:
+            self.screens["comms"].append("COPILOT", event)
 
     def on_stop(self):
-        self.telemetry.running = False
-        if self.telemetry.sock:
-            try:
-                self.telemetry.sock.close()
-            except OSError:
-                pass
+        self.telemetry.stop()
 
 
 if __name__ == "__main__":
