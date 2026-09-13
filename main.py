@@ -382,7 +382,9 @@ class MyFlightScreen(Screen):
         self.pos = Metric("Position")
         self.tod = Metric("TOD")
         for item in (self.alt, self.spd, self.hdg, self.vs, self.pos, self.tod):
-            metrics.add_widget(Card(children=[item], orientation="vertical"))
+            metric_card = Card(orientation="vertical")
+            metric_card.add_widget(item)
+            metrics.add_widget(metric_card)
         root.add_widget(metrics)
         root.add_widget(Label(text="LIVE TELEMETRY  •  UDP 58585", color=MUTED, font_size="10sp", size_hint_y=None, height=dp(22)))
         self.add_widget(root)
