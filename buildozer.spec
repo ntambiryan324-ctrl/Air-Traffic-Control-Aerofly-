@@ -11,7 +11,8 @@ fullscreen = 0
 android.api = 34
 android.minapi = 24
 android.ndk = 25b
-android.archs = arm64-v8a\nandroid.permissions = INTERNET,ACCESS_NETWORK_STATE
+android.archs = arm64-v8a
+android.permissions = INTERNET,ACCESS_NETWORK_STATE
 android.accept_sdk_license = True
 p4a.branch = v2024.01.21
 p4a.commit = HEAD
