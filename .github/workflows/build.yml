@@ -52,7 +52,7 @@ jobs:
           P4A_RELEASE: "master"
         run: |
           rm -rf .buildozer bin
-          buildozer android debug
+          buildozer -v android debug
 
       - name: Verify APK
         run: |
