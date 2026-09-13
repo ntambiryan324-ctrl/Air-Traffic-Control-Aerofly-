@@ -31,17 +31,28 @@ WARN = (1.0, 0.67, 0.20, 1)
 
 
 class Telemetry:
-    """Aerofly FSWidgets-compatible UDP receiver plus JSON test mode.
+    """Dual Aerofly mobile receiver.
 
-    Aerofly's mobile FSWidgets stream is plain text, not JSON. The stream
-    contains XGPS and XATT records on UDP port 58585.
+    1) FSWidgets stream: TCP 58585. The client connects to the simulator and
+       sends the small HTTP-style wake-up request used by Aerofly mobile.
+    2) ForeFlight-style broadcast: UDP 40092. Aerofly sends XGPS/XATT lines
+       containing position and attitude data.
+
+    Both feeds use the same XGPS/XATT sentence formats. The receivers are
+    independent so either feed can update the flight state.
     """
 
-    def __init__(self, port=TELEMETRY_PORT):
-        self.port = port
+    TCP_PORT = 58585
+    UDP_PORT = 40092
+
+    def __init__(self, tcp_host="127.0.0.1"):
+        self.tcp_host = tcp_host.strip() or "127.0.0.1"
         self.data = {
             "connected": False,
+            "tcp_connected": False,
+            "udp_connected": False,
             "callsign": "UNKNOWN",
+            "sim_name": "",
             "lat": 0.0,
             "lon": 0.0,
             "altitude": 0.0,
@@ -54,10 +65,13 @@ class Telemetry:
             "phase": "WAITING",
             "timestamp": 0.0,
             "source_ip": "",
+            "transport": "NONE",
             "packets": 0,
+            "last_error": "",
         }
-        self.lock = threading.Lock()
-        self.sock = None
+        self.lock = threading.RLock()
+        self.udp_sock = None
+        self.tcp_sock = None
         self.running = False
         self.last_altitude = None
         self.last_altitude_time = None
@@ -67,109 +81,165 @@ class Telemetry:
         if self.running:
             return True
         self.running = True
-        threading.Thread(target=self._listen, daemon=True).start()
+        threading.Thread(target=self._udp_loop, daemon=True).start()
+        threading.Thread(target=self._tcp_loop, daemon=True).start()
         return True
 
-    def _listen(self):
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            try:
-                sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-            except OSError:
-                pass
-            sock.bind(("0.0.0.0", self.port))
-            sock.settimeout(1.0)
-            self.sock = sock
-        except OSError:
-            self.running = False
+    def set_tcp_host(self, host):
+        host = str(host).strip() or "127.0.0.1"
+        if host == self.tcp_host:
             return
+        self.tcp_host = host
+        self._close_tcp()
 
+    def _udp_loop(self):
         while self.running:
+            sock = None
             try:
-                raw, address = sock.recvfrom(65535)
-                self._parse(raw.decode("utf-8", errors="replace"), address[0])
-            except socket.timeout:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                try:
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+                except OSError:
+                    pass
+                sock.bind(("0.0.0.0", self.UDP_PORT))
+                sock.settimeout(1.0)
+                self.udp_sock = sock
+                while self.running:
+                    try:
+                        raw, address = sock.recvfrom(65535)
+                        self._consume(raw.decode("utf-8", errors="replace"), address[0], "UDP 40092")
+                    except socket.timeout:
+                        self._refresh_connection_flags()
+                    except OSError:
+                        break
+                    except Exception as exc:
+                        with self.lock:
+                            self.data["last_error"] = str(exc)
+            except OSError as exc:
                 with self.lock:
-                    if time.time() - self.data["timestamp"] > 5:
-                        self.data["connected"] = False
-            except OSError:
-                break
-            except Exception:
-                continue
+                    self.data["last_error"] = "UDP 40092: " + str(exc)
+                time.sleep(2)
+            finally:
+                try:
+                    if sock:
+                        sock.close()
+                except OSError:
+                    pass
+                self.udp_sock = None
 
-    def _parse(self, text, source_ip):
+    def _tcp_loop(self):
+        while self.running:
+            sock = None
+            try:
+                sock = socket.create_connection((self.tcp_host, self.TCP_PORT), timeout=3.0)
+                sock.settimeout(2.0)
+                self.tcp_sock = sock
+                with self.lock:
+                    self.data["tcp_connected"] = True
+                    self.data["last_error"] = ""
+                # Aerofly mobile's FSWidgets endpoint expects the client to
+                # initiate the connection before it starts streaming.
+                sock.sendall(b"GET / HTTP/1.1\r\nHost: aerofly\r\nConnection: keep-alive\r\n\r\n")
+                buffer = b""
+                while self.running:
+                    try:
+                        chunk = sock.recv(8192)
+                        if not chunk:
+                            break
+                        buffer += chunk
+                        while b"\n" in buffer:
+                            raw_line, buffer = buffer.split(b"\n", 1)
+                            self._consume(raw_line.decode("utf-8", errors="replace"), self.tcp_host, "TCP 58585")
+                    except socket.timeout:
+                        self._refresh_connection_flags()
+            except (OSError, socket.timeout) as exc:
+                with self.lock:
+                    self.data["tcp_connected"] = False
+                    self.data["last_error"] = "TCP 58585: " + str(exc)
+                time.sleep(2)
+            finally:
+                try:
+                    if sock:
+                        sock.close()
+                except OSError:
+                    pass
+                self.tcp_sock = None
+                with self.lock:
+                    self.data["tcp_connected"] = False
+                time.sleep(0.5)
+
+    def _consume(self, text, source_ip, transport):
+        # TCP may contain HTTP headers before the Aerofly stream.
         for line in text.replace("\r", "").split("\n"):
             line = line.strip()
-            if not line:
+            if not line or line.startswith("HTTP/") or ":" in line and not line.startswith(("XGPS", "XATT")):
                 continue
             try:
-                if line.startswith("{"):
-                    payload = json.loads(line)
-                    if isinstance(payload, dict):
-                        with self.lock:
-                            self.data.update(payload)
-                            self.data["source_ip"] = source_ip
-                            self.data["connected"] = True
-                            self.data["timestamp"] = time.time()
-                            self.data["packets"] += 1
-                            self.data["phase"] = self._phase(self.data)
-                    continue
                 if line.startswith("XGPS"):
-                    self._parse_xgps(line, source_ip)
+                    self._parse_xgps(line, source_ip, transport)
                 elif line.startswith("XATT"):
-                    self._parse_xatt(line, source_ip)
+                    self._parse_xatt(line, source_ip, transport)
             except (ValueError, IndexError):
                 continue
 
-    def _parse_xgps(self, line, source_ip):
-        parts = line.split(",")
-        if len(parts) < 5:
+    def _parse_xgps(self, line, source_ip, transport):
+        # XGPS<sim>,lon,lat,alt_msl_m,track_true_deg,groundspeed_mps
+        parts = line[4:].strip().split(",")
+        if len(parts) < 6:
             return
-        values = [float(x) for x in parts[1:]]
-        lon = values[0]
-        lat = values[1]
-        altitude_ft = values[2] * 3.28084
-        speed_kt = values[3] * 1.943844 if len(values) > 3 else 0.0
+        sim_name = parts[0].strip()
+        lon = float(parts[1])
+        lat = float(parts[2])
+        altitude_ft = float(parts[3]) * 3.280839895
+        speed_kt = float(parts[5]) * 1.943844492
+        track = float(parts[4]) % 360.0
         now = time.time()
         with self.lock:
             if self.last_altitude is not None and self.last_altitude_time:
                 dt = now - self.last_altitude_time
-                if 0.05 < dt < 5:
+                if 0.05 < dt < 5.0:
                     self.data["vertical_speed"] = (altitude_ft - self.last_altitude) / dt * 60.0
             self.last_altitude = altitude_ft
             self.last_altitude_time = now
             self.data.update({
-                "lat": lat,
-                "lon": lon,
-                "altitude": altitude_ft,
-                "speed": speed_kt,
-                "source_ip": source_ip,
-                "connected": True,
-                "timestamp": now,
-                "packets": self.data["packets"] + 1,
+                "lat": lat, "lon": lon, "altitude": altitude_ft,
+                "speed": speed_kt, "heading": track,
+                "sim_name": sim_name, "source_ip": source_ip,
+                "transport": transport, "connected": True,
+                "timestamp": now, "packets": self.data["packets"] + 1,
             })
-            if len(values) > 4 and abs(values[4]) > 0.01 and self.data["heading"] == 0:
-                self.data["heading"] = values[4] % 360.0
             self.data["on_ground"] = altitude_ft < 50 and abs(self.data["vertical_speed"]) < 600
             self.data["phase"] = self._phase(self.data)
             self.trail.append((lat, lon))
             if len(self.trail) > 600:
-                self.trail.pop(0)
+                del self.trail[:-600]
 
-    def _parse_xatt(self, line, source_ip):
-        parts = line.split(",")
+    def _parse_xatt(self, line, source_ip, transport):
+        # XATT<sim>,true_heading,pitch_deg,roll_deg
+        parts = line[4:].strip().split(",")
         if len(parts) < 4:
             return
-        yaw, pitch, bank = (float(parts[1]), float(parts[2]), float(parts[3]))
+        sim_name = parts[0].strip()
+        heading, pitch, bank = float(parts[1]), float(parts[2]), float(parts[3])
         with self.lock:
-            self.data["heading"] = yaw % 360.0
-            self.data["pitch"] = pitch
-            self.data["bank"] = bank
-            self.data["source_ip"] = source_ip
-            self.data["connected"] = True
-            self.data["timestamp"] = time.time()
-            self.data["packets"] += 1
+            self.data.update({
+                "heading": heading % 360.0,
+                "pitch": pitch,
+                "bank": bank,
+                "sim_name": sim_name,
+                "source_ip": source_ip,
+                "transport": transport,
+                "connected": True,
+                "timestamp": time.time(),
+                "packets": self.data["packets"] + 1,
+            })
+            self.data["phase"] = self._phase(self.data)
+
+    def _refresh_connection_flags(self):
+        with self.lock:
+            stale = time.time() - self.data["timestamp"] > 5
+            self.data["connected"] = not stale and (self.data["tcp_connected"] or self.data["udp_connected"])
 
     @staticmethod
     def _phase(d):
@@ -187,17 +257,32 @@ class Telemetry:
 
     def snapshot(self):
         with self.lock:
-            return dict(self.data)
+            result = dict(self.data)
+            result["tcp_host"] = self.tcp_host
+            return result
 
     def trail_snapshot(self):
         with self.lock:
             return list(self.trail)
 
+    def _close_tcp(self):
+        sock = self.tcp_sock
+        if sock:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
+                sock.close()
+            except OSError:
+                pass
+
     def stop(self):
         self.running = False
-        if self.sock:
+        self._close_tcp()
+        if self.udp_sock:
             try:
-                self.sock.close()
+                self.udp_sock.close()
             except OSError:
                 pass
 
