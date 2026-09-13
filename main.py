@@ -643,10 +643,9 @@ class MoreScreen(Screen):
         self.app_ref = app_ref
         root = BoxLayout(orientation="vertical", spacing=dp(7), padding=dp(8))
         root.add_widget(TitleBar("MORE", "Connection and app settings"))
-        card = Card(orientation="vertical", size_hint_y=None, height=dp(230))
         card = Card(orientation="vertical", size_hint_y=None, height=dp(330))
         card.add_widget(Label(text="AEROFLY MOBILE CONNECTION", color=TEXT, font_size="17sp", bold=True))
-        card.add_widget(Label(text="TCP 58585 = FSWidgets stream\\nUDP 40092 = ForeFlight-style broadcast\\n\\nFor Aerofly FS Global on THIS tablet, leave simulator host as 127.0.0.1. The app connects to Aerofly on TCP 58585 while also listening for UDP 40092.\\n\\nIf Aerofly is running on another device, enter that device's local IPv4 address. Enable the appropriate flight-data sharing option in Aerofly.", color=MUTED, halign="left"))
+        card.add_widget(Label(text="TCP 58585 = FSWidgets stream\nUDP 40092 = ForeFlight-style broadcast\n\nFor Aerofly FS Global on THIS tablet, leave simulator host as 127.0.0.1. The app connects to Aerofly on TCP 58585 while also listening for UDP 40092.\n\nIf Aerofly is running on another device, enter that device's local IPv4 address. Enable the appropriate flight-data sharing option in Aerofly.", color=MUTED, halign="left"))
         host_row = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(6))
         host_row.add_widget(Label(text="SIM HOST", color=MUTED, size_hint_x=None, width=dp(80)))
         self.host = TextInput(text=self.app_ref.telemetry.tcp_host, multiline=False)
