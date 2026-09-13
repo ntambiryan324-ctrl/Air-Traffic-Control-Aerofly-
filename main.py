@@ -5,6 +5,7 @@ import re
 import socket
 import threading
 import time
+import traceback
 
 from kivy.app import App
 from kivy.clock import Clock
@@ -475,7 +476,7 @@ class MyFlightScreen(Screen):
             metric_card.add_widget(item)
             metrics.add_widget(metric_card)
         root.add_widget(metrics)
-        root.add_widget(Label(text="LIVE TELEMETRY  •  UDP 58585", color=MUTED, font_size="10sp", size_hint_y=None, height=dp(22)))
+        root.add_widget(Label(text="LIVE TELEMETRY  •  TCP 58585 / UDP 40092", color=MUTED, font_size="10sp", size_hint_y=None, height=dp(22)))
         self.add_widget(root)
 
     def refresh(self, d):
@@ -512,7 +513,7 @@ class MapScreen(Screen):
             self.map_label.text = "%.5f  %.5f   •   %03.0f°   •   %.0f ft" % (
                 d.get("lat", 0), d.get("lon", 0), d.get("heading", 0), d.get("altitude", 0))
         else:
-            self.map_label.text = "Waiting for Aerofly telemetry on UDP 58585"
+            self.map_label.text = "Waiting for Aerofly telemetry • TCP 58585 / UDP 40092"
 
 
 class CommsScreen(Screen):
@@ -670,21 +671,42 @@ class MoreScreen(Screen):
 
 
 class AeroflyCompanion(App):
+    def _write_crash_log(self, exc):
+        try:
+            path = os.path.join(self.user_data_dir, "startup_error.log")
+            with open(path, "a", encoding="utf-8") as f:
+                f.write("\n--- startup/runtime error ---\n")
+                traceback.print_exc(file=f)
+        except Exception:
+            pass
+
     def build(self):
         self.telemetry = Telemetry()
         self.copilot = Copilot()
-        self.telemetry.start()
-
         manager = ScreenManager(transition=SlideTransition(duration=0.12))
         self.screens = {}
-        for name, screen in (
-            ("flight", MyFlightScreen(self, name="flight")),
-            ("map", MapScreen(self, name="map")),
-            ("comms", CommsScreen(self, name="comms")),
-            ("scratch", ScratchpadScreen(self, name="scratch")),
-            ("checklists", ChecklistsScreen(name="checklists")),
-            ("more", MoreScreen(self, name="more")),
-        ):
+        definitions = (
+            ("flight", lambda: MyFlightScreen(self, name="flight")),
+            ("map", lambda: MapScreen(self, name="map")),
+            ("comms", lambda: CommsScreen(self, name="comms")),
+            ("scratch", lambda: ScratchpadScreen(self, name="scratch")),
+            ("checklists", lambda: ChecklistsScreen(name="checklists")),
+            ("more", lambda: MoreScreen(self, name="more")),
+        )
+        for name, factory in definitions:
+            try:
+                screen = factory()
+            except Exception as exc:
+                self._write_crash_log(exc)
+                screen = Screen(name=name)
+                box = BoxLayout(orientation="vertical", padding=dp(20), spacing=dp(12))
+                box.add_widget(Label(text=name.upper() + " FAILED TO LOAD", color=WARN, font_size="22sp"))
+                box.add_widget(Label(
+                    text="This page failed safely instead of crashing the app.\n\n"
+                         "Open startup_error.log and send it for diagnosis.",
+                    color=TEXT, halign="center"
+                ))
+                screen.add_widget(box)
             self.screens[name] = screen
             manager.add_widget(screen)
 
@@ -692,35 +714,45 @@ class AeroflyCompanion(App):
         nav.add_widget(manager)
         bottom = BoxLayout(size_hint_y=None, height=dp(62), spacing=dp(3), padding=(dp(4), dp(4)))
         for name, label in (
-            ("flight", "MY FLIGHT"),
-            ("map", "MAP"),
-            ("comms", "COMMS"),
-            ("scratch", "SCRATCH"),
-            ("checklists", "CHECKLISTS"),
-            ("more", "MORE"),
+            ("flight", "MY FLIGHT"), ("map", "MAP"), ("comms", "COMMS"),
+            ("scratch", "SCRATCH"), ("checklists", "CHECKLISTS"), ("more", "MORE"),
         ):
-            button = Button(text=label, background_normal="", background_color=CARD2, color=TEXT, font_size="10sp")
+            button = Button(text=label, background_normal="", background_color=CARD2,
+                            color=TEXT, font_size="10sp")
             button.bind(on_press=lambda _, n=name: self.go(n))
             bottom.add_widget(button)
         nav.add_widget(bottom)
         self.manager = manager
+        Clock.schedule_once(self._start_services, 0.5)
         Clock.schedule_interval(self.tick, 0.25)
         return nav
+
+    def _start_services(self, _dt):
+        try:
+            self.telemetry.start()
+        except Exception as exc:
+            self._write_crash_log(exc)
 
     def go(self, name):
         self.manager.current = name
 
     def tick(self, _dt):
-        d = self.telemetry.snapshot()
-        self.screens["flight"].refresh(d)
-        self.screens["map"].refresh(d, self.telemetry.trail_snapshot())
-        self.screens["more"].refresh(d)
-        event = self.copilot.monitor(d)
-        if event and self.copilot.afk:
-            self.screens["comms"].append("COPILOT", event)
+        try:
+            d = self.telemetry.snapshot()
+            self.screens["flight"].refresh(d)
+            self.screens["map"].refresh(d, self.telemetry.trail_snapshot())
+            self.screens["more"].refresh(d)
+            event = self.copilot.monitor(d)
+            if event and self.copilot.afk:
+                self.screens["comms"].append("COPILOT", event)
+        except Exception as exc:
+            self._write_crash_log(exc)
 
     def on_stop(self):
-        self.telemetry.stop()
+        try:
+            self.telemetry.stop()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
