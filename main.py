@@ -207,6 +207,8 @@ class Telemetry:
                 "speed": speed_kt, "heading": track,
                 "sim_name": sim_name, "source_ip": source_ip,
                 "transport": transport, "connected": True,
+                "udp_connected": transport.startswith("UDP"),
+                "tcp_connected": self.data["tcp_connected"] or transport.startswith("TCP"),
                 "timestamp": now, "packets": self.data["packets"] + 1,
             })
             self.data["on_ground"] = altitude_ft < 50 and abs(self.data["vertical_speed"]) < 600
@@ -231,6 +233,8 @@ class Telemetry:
                 "source_ip": source_ip,
                 "transport": transport,
                 "connected": True,
+                "udp_connected": self.data["udp_connected"] or transport.startswith("UDP"),
+                "tcp_connected": self.data["tcp_connected"] or transport.startswith("TCP"),
                 "timestamp": time.time(),
                 "packets": self.data["packets"] + 1,
             })
@@ -640,12 +644,24 @@ class MoreScreen(Screen):
         root = BoxLayout(orientation="vertical", spacing=dp(7), padding=dp(8))
         root.add_widget(TitleBar("MORE", "Connection and app settings"))
         card = Card(orientation="vertical", size_hint_y=None, height=dp(230))
-        card.add_widget(Label(text="AEROFLY CONNECTION", color=TEXT, font_size="17sp", bold=True))
-        card.add_widget(Label(text="UDP PORT  58585\n\nAerofly FS: Settings → Miscellaneous → Send flight data to FSWidgets apps\n\nPoint Aerofly at this tablet's IPv4 address and port 58585. Both apps can run side-by-side on the same Android tablet.\n\nThe receiver accepts Aerofly's XGPS/XATT plain-text stream.", color=MUTED, halign="left"))
+        card = Card(orientation="vertical", size_hint_y=None, height=dp(330))
+        card.add_widget(Label(text="AEROFLY MOBILE CONNECTION", color=TEXT, font_size="17sp", bold=True))
+        card.add_widget(Label(text="TCP 58585 = FSWidgets stream\\nUDP 40092 = ForeFlight-style broadcast\\n\\nFor Aerofly FS Global on THIS tablet, leave simulator host as 127.0.0.1. The app connects to Aerofly on TCP 58585 while also listening for UDP 40092.\\n\\nIf Aerofly is running on another device, enter that device's local IPv4 address. Enable the appropriate flight-data sharing option in Aerofly.", color=MUTED, halign="left"))
+        host_row = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(6))
+        host_row.add_widget(Label(text="SIM HOST", color=MUTED, size_hint_x=None, width=dp(80)))
+        self.host = TextInput(text=self.app_ref.telemetry.tcp_host, multiline=False)
+        host_row.add_widget(self.host)
+        apply_btn = Button(text="APPLY", size_hint_x=None, width=dp(75))
+        apply_btn.bind(on_press=self.apply_host)
+        host_row.add_widget(apply_btn)
+        card.add_widget(host_row)
         root.add_widget(card)
         self.status = Label(text="", color=MUTED)
         root.add_widget(self.status)
         self.add_widget(root)
+
+    def apply_host(self, *_):
+        self.app_ref.telemetry.set_tcp_host(self.host.text)
 
     def refresh(self, d):
         self.status.text = "Receiver: %s   •   Source: %s   •   Packets: %s" % (
