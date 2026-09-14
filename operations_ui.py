@@ -16,7 +16,7 @@ class OperationsScreen(Screen):
         s=ScrollView(); box=BoxLayout(orientation="vertical",spacing=dp(6),size_hint_y=None); box.bind(minimum_height=box.setter("height"))
         self.icao=TextInput(text="HUEN",multiline=False,hint_text="ICAO airport",size_hint_y=None,height=dp(44))
         box.add_widget(self.icao)
-        for label,fn in (("AIRPORT INFO",self.airport),("METAR",self.metar),("TAF",self.taf),("RADAR",self.radar),("ROUTE ANALYSIS",self.route)):
+        for label,fn in (("AIRPORT INFO",self.airport),("METAR",self.metar),("TAF",self.taf),("SEARCH AIRPORTS",self.search),("RADAR",self.radar),("ROUTE ANALYSIS",self.route),("NEAREST AIRPORT",self.nearest),("REPLAY LOG",self.replay)):
             b=app_ref.button(label, label=="METAR",42); b.bind(on_press=fn); box.add_widget(b)
         self.output=TextInput(readonly=True,multiline=True,size_hint_y=None,height=dp(220)); box.add_widget(self.output)
         self.alerts=Label(text="FLIGHT ALERTS: none",size_hint_y=None,height=dp(42)); box.add_widget(self.alerts)
@@ -38,6 +38,17 @@ class OperationsScreen(Screen):
     def show(self,data,err):
         self.output.text=("REQUEST FAILED\n"+repr(err)) if err else json.dumps(data,indent=2)[:14000]
     def airport(self,*_):self.worker(lambda:adv.fetch_airport(self.icao.text))
+    def search(self,*_):self.worker(lambda:adv.search_airports(self.icao.text))
+    def nearest(self,*_):
+        d=self.app_ref.telemetry.snapshot()
+        if not d.get("connected"): self.output.text="Connect Aerofly first."; return
+        n=adv.nearest_airport(d["lat"],d["lon"])
+        self.output.text=("NEAREST REFERENCE AIRPORT\\nICAO: %s\\nNAME: %s\\nDISTANCE: %.1f NM\\nPOSITION: %.4f, %.4f"%n) if n else "No airport reference available."
+    def replay(self,*_):
+        rows=self.app_ref.logger.load()
+        if not rows:self.output.text="No recorded flight log.";return
+        first,last=rows[0],rows[-1]
+        self.output.text="FLIGHT REPLAY LOG\\nSAMPLES: %d\\nSTART: %s\\nEND: %s\\n\\nReplay data is retained locally in flight_log.jsonl and can be rendered on the map in the next playback pass."%(len(rows),time.strftime("%Y-%m-%d %H:%M:%S",time.localtime(first["t"])),time.strftime("%Y-%m-%d %H:%M:%S",time.localtime(last["t"])))
     def metar(self,*_):self.worker(lambda:adv.fetch_metar(self.icao.text))
     def taf(self,*_):self.worker(lambda:adv.fetch_taf(self.icao.text))
     def radar(self,*_):
