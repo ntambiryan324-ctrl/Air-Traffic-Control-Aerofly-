@@ -7,9 +7,11 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+import advanced_features as adv
+from operations_ui import OperationsScreen
 
 from kivy.clock import Clock
-from kivy.graphics import Color, Line, Rectangle
+from kivy.graphics import Color, Line, Rectangle, Ellipse
 from kivy.metrics import dp
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.button import Button
@@ -564,7 +566,7 @@ class ProAeroflyApp(core.App):
         definitions=[
             ("home",HomeScreen),("flight",MyFlightScreen),("map",MapScreen),("comms",CommsScreen),
             ("frequencies",FrequenciesScreen),("flightplan",FlightPlanScreen),("scratch",ScratchScreen),
-            ("checklists",ChecklistsScreen),("settings",SettingsScreen),("diagnostics",DiagnosticsScreen)]
+            ("checklists",ChecklistsScreen),("operations",OperationsScreen),("settings",SettingsScreen),("diagnostics",DiagnosticsScreen)]
         for name,cls in definitions:
             try:
                 self.manager.add_widget(cls(self,name=name))
@@ -603,6 +605,15 @@ class ProAeroflyApp(core.App):
     def go(self,name):
         if name=="more":name="diagnostics"
         self.manager.current=name
+    def button(self,text,active=False,height=42):
+        return button(text,active,height)
+    def header(self,title,subtitle=""):
+        return Header(title,subtitle,self)
+    def enable_radar(self,url):
+        try:
+            return bool(self.screens.get("map") and self.screens["map"].map.set_radar_source(url))
+        except Exception:
+            return False
     def set_alert(self,text,level="info"):
         self.alert_text=text;self.alert_level=level
         if self.alerts_enabled and level in ("warning","danger"):
@@ -618,6 +629,7 @@ class ProAeroflyApp(core.App):
     def tick(self,*_):
         try:
             d=self.telemetry.snapshot()
+            self.logger.record(d)
             self.screens_refresh(d)
             event=self.copilot.monitor(d)
             if event and self.copilot.afk:self.screens["comms"].append("COPILOT",event)
@@ -636,6 +648,7 @@ class ProAeroflyApp(core.App):
         if "flight" in self.screens:self.screens["flight"].refresh(d)
         if "map" in self.screens:self.screens["map"].refresh(d)
         if "diagnostics" in self.screens:self.screens["diagnostics"].refresh(d)
+        if "operations" in self.screens:self.screens["operations"].refresh_alerts()
     def on_stop(self):
         try:self.telemetry.stop()
         except Exception:pass
