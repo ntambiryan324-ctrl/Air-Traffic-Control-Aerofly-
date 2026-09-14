@@ -412,11 +412,14 @@ class CommsScreen(Screen):
         self.append("PILOT", text)
         self.input.text = ""
         self.app_ref.copilot.observe_atc(text, "PILOT", self.com1.text[-7:])
+        readback=self.app_ref.clearance.readback(text)
+        if self.app_ref.clearance.current: self.append("READBACK", "CORRECT" if readback else "NOT VERIFIED")
         self.app_ref.gemini.ask(self.app_ref.telemetry.snapshot(), text, self.reply)
     def reply(self, ok, text):
         self.append("ATC", text)
         if ok:
             self.app_ref.copilot.observe_atc(text, "GEMINI ATC", self.com1.text[-7:])
+            self.app_ref.clearance.parse(text)
             self.app_ref.set_alert("New ATC transmission received.", "info")
     def append(self, speaker, text):
         self.chat.text += "\n\n%s\n%s" % (speaker, text)
