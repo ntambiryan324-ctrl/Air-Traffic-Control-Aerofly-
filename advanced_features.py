@@ -116,3 +116,17 @@ class FlightAlertEngine:
 def nearest_point(lat,lon,points):
     if not points:return None
     return min(points,key=lambda p:haversine_nm(lat,lon,p[0],p[1]))
+
+KNOWN_AIRPORTS = {
+ "HUEN":(0.0424,32.4435,"Entebbe International"),"HKJK":(-1.3192,36.9278,"Jomo Kenyatta"),
+ "FAOR":(-26.1367,28.2411,"O.R. Tambo"),"EGLL":(51.4700,-0.4543,"London Heathrow"),
+ "EHAM":(52.3105,4.7683,"Amsterdam Schiphol"),"EDDF":(50.0379,8.5622,"Frankfurt"),
+ "LFPG":(49.0097,2.5479,"Paris Charles de Gaulle"),"OMDB":(25.2532,55.3657,"Dubai International"),
+ "KJFK":(40.6413,-73.7781,"John F Kennedy"),"KLAX":(33.9425,-118.4081,"Los Angeles"),
+ "KSFO":(37.6213,-122.3790,"San Francisco"),"KORD":(41.9742,-87.9073,"Chicago O'Hare"),
+ "KATL":(33.6407,-84.4277,"Atlanta"),"RJTT":(35.5494,139.7798,"Tokyo Haneda"),
+ "YSSY":(-33.9399,151.1753,"Sydney")
+}
+def nearest_airport(lat,lon):
+    if not KNOWN_AIRPORTS:return None
+    return min(((haversine_nm(lat,lon,a,b),icao,name,a,b) for icao,(a,b,name) in KNOWN_AIRPORTS.items()),key=lambda x:x[0])
