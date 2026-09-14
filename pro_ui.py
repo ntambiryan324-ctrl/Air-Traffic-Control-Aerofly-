@@ -96,12 +96,15 @@ class Header(BoxLayout):
             q.bind(on_press=lambda *_: app_ref.go("settings"))
             self.add_widget(q)
 
-class AircraftMarker(MapMarker):
+MapMarkerBase = MapMarker if MAPVIEW_AVAILABLE else Widget
+MapLayerBase = MapLayer if MAPVIEW_AVAILABLE else Widget
+
+class AircraftMarker(MapMarkerBase):
     def __init__(self, **kw):
         super().__init__(source=os.path.join(os.path.dirname(__file__), "assets", "aircraft.svg"),
                          size=(dp(34), dp(34)), anchor_x=.5, anchor_y=.5, **kw)
 
-class FlightPathLayer(MapLayer):
+class FlightPathLayer(MapLayerBase):
     def __init__(self, mapview, points=None, color=ACCENT, width=2.2, **kw):
         super().__init__(**kw)
         self.mapview = mapview
