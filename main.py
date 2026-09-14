@@ -756,4 +756,5 @@ class AeroflyCompanion(App):
 
 
 if __name__ == "__main__":
-    AeroflyCompanion().run()
+    from pro_ui import ProAeroflyApp
+    ProAeroflyApp().run()
