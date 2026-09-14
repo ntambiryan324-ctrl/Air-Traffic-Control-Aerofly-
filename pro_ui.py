@@ -93,13 +93,13 @@ class AircraftMarker(MapMarker):
                          size=(dp(34), dp(34)), anchor_x=.5, anchor_y=.5, **kw)
 
 class FlightPathLayer(MapLayer):
-    def __init__(self, mapview, points=None, **kw):
+    def __init__(self, mapview, points=None, color=ACCENT, width=2.2, **kw):
         super().__init__(**kw)
         self.mapview = mapview
         self.points = points or []
         with self.canvas:
-            Color(*ACCENT)
-            self.line = Line(points=[], width=dp(2.2))
+            Color(*color)
+            self.line = Line(points=[], width=dp(width))
     def set_points(self, points):
         self.points = list(points)
         self.reposition()
@@ -124,8 +124,10 @@ class AviationMap(BoxLayout):
                                         cache_key="osm-live", min_zoom=1, max_zoom=19, tile_size=256,
                                         attribution="© OpenStreetMap contributors", subdomains="abc")
         self.map.add_marker(self.marker)
-        self.path_layer = FlightPathLayer(self.map, [])
-        self.map.add_layer(self.path_layer, mode="scatter")
+        self.actual_layer = FlightPathLayer(self.map, [], color=ACCENT, width=2.2)
+        self.planned_layer = FlightPathLayer(self.map, [], color=AMBER, width=1.6)
+        self.map.add_layer(self.actual_layer, mode="scatter")
+        self.map.add_layer(self.planned_layer, mode="scatter")
         self.add_widget(self.map)
     def aviation_source(self):
         key = self.app_ref.openaip_key.strip()
@@ -159,7 +161,8 @@ class AviationMap(BoxLayout):
                 self.map.center_on(lat, lon)
             if self.map.zoom < 8 and abs(lat) + abs(lon) > 0.01:
                 self.map.zoom = 8
-        self.path_layer.set_points(trail[-250:])
+        self.actual_layer.set_points(trail[-250:])
+        self.planned_layer.set_points(self.app_ref.plan.get("points", []))
     def center(self):
         d = self.app_ref.telemetry.snapshot()
         if d.get("connected"):
