@@ -202,6 +202,14 @@ class AviationMap(BoxLayout):
         self.map.map_source = src
         self.map.zoom = max(8, self.map.zoom)
         self.app_ref.set_alert("Aviation chart layer enabled.", "info")
+    def set_radar_source(self, radar_url):
+        if not MAPVIEW_AVAILABLE or self.map is None or not hasattr(self.map, "map_source"):
+            return False
+        self.map.map_source = MapSource(url=radar_url, cache_key="rainviewer-radar", min_zoom=1, max_zoom=7, tile_size=256, attribution="Weather data by RainViewer", subdomains="")
+        self.map.zoom = min(max(self.map.zoom, 3), 7)
+        self.chart = False
+        return True
+
     def set_base(self):
         self.chart = False
         self.map.map_source = MapSource(url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
