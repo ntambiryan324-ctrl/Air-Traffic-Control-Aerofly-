@@ -38,11 +38,11 @@ jobs:
 
       - name: Static checks
         run: |
-          python -m py_compile main.py aviation_features.py
-          python -m compileall -q main.py aviation_features.py
+          python -m py_compile main.py aviation_features.py pro_ui.py
+          python -m compileall -q main.py aviation_features.py pro_ui.py
           python - <<'PY'
           import ast
-          for path in ("main.py", "aviation_features.py"):
+          for path in ("main.py", "aviation_features.py", "pro_ui.py"):
               ast.parse(open(path, encoding="utf-8").read(), filename=path)
           print("Python source checks passed")
           PY
