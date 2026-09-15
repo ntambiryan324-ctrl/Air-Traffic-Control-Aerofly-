@@ -520,6 +520,29 @@ class AviationMap(Widget):
                 if self.x-20<sx<self.right+20 and self.y-20<sy<self.top+20:
                     Color(*ACCENT);Ellipse(pos=(sx-3,sy-3),size=(6,6))
                     # labels are rendered as a separate Label layer below
+            if self.ifr_visible:
+                for n in self.navaids:
+                    sx,sy=self.screen(n["lat"],n["lon"])
+                    if self.x-20<sx<self.right+20 and self.y-20<sy<self.top+20:
+                        Color(0.25,0.85,1.0,0.9)
+                        Line(circle=(sx,sy,dp(5)),width=1)
+                for a in self.airspaces:
+                    pass
+            wx=self.weather
+            sx,sy=self.screen(self.center_lat,self.center_lon)
+            if self.weather_mode=="precipitation" and wx.get("precipitation") is not None:
+                intensity=min(1.0,float(wx["precipitation"])/10.0)
+                Color(0.15,0.35,1.0,0.12+0.30*intensity)
+                Ellipse(pos=(sx-dp(55),sy-dp(55)),size=(dp(110),dp(110)))
+            elif self.weather_mode=="clouds" and wx.get("clouds") is not None:
+                coverage=float(wx["clouds"])/100.0
+                Color(0.7,0.75,0.8,0.08+0.20*coverage)
+                Ellipse(pos=(sx-dp(65),sy-dp(65)),size=(dp(130),dp(130)))
+            elif self.weather_mode=="winds" and wx.get("wind_speed") is not None:
+                ang=math.radians(float(wx.get("wind_dir") or 0))
+                length=dp(45); ex=sx+math.sin(ang)*length; ey=sy+math.cos(ang)*length
+                Color(0.25,0.9,0.8,0.9)
+                Line(points=[sx,sy,ex,ey],width=dp(2))
             if self.data.get("connected"):
                 px,py=self.screen(self.data.get("lat",0),self.data.get("lon",0))
             else: px,py=self.center
