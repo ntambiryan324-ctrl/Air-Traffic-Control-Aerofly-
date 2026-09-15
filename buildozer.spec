@@ -5,8 +5,7 @@ package.domain = org.aeroflycompanion
 source.dir = .
 source.include_exts = py,txt,png,jpg,jpeg,svg,kv
 version = 2.0.0
-requirements = python3,kivy==2.3.0,kivymd==1.2.0,requests,openssl,plyer
-garden_requirements = mapview
+requirements = python3,kivy==2.3.0,pyjnius
 orientation = portrait
 fullscreen = 0
 android.api = 34
