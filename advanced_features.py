@@ -130,3 +130,58 @@ KNOWN_AIRPORTS = {
 def nearest_airport(lat,lon):
     if not KNOWN_AIRPORTS:return None
     return min(((haversine_nm(lat,lon,a,b),icao,name,a,b) for icao,(a,b,name) in KNOWN_AIRPORTS.items()),key=lambda x:x[0])
+
+
+def _csv_rows(url):
+    import csv, io
+    req=urllib.request.Request(url,headers={"User-Agent":"AeroflyATC/2.2"})
+    with urllib.request.urlopen(req,timeout=12) as r:
+        return list(csv.DictReader(io.TextIOWrapper(r,"utf-8")))
+
+def nearby_airports(lat,lon,radius_nm=8):
+    try:
+        rows=_csv_rows("https://davidmegginson.github.io/ourairports-data/airports.csv")
+        out=[]
+        for x in rows:
+            try:
+                a=float(x.get("latitude_deg") or 0);b=float(x.get("longitude_deg") or 0)
+                dist=haversine_nm(lat,lon,a,b)
+                if dist<=radius_nm:
+                    out.append({"ident":x.get("ident") or x.get("gps_code") or x.get("local_code") or "----",
+                                "name":x.get("name") or "Airport","lat":a,"lon":b,
+                                "elevation_ft":x.get("elevation_ft") or ""})
+            except (ValueError,TypeError): continue
+        return sorted(out,key=lambda x:haversine_nm(lat,lon,x["lat"],x["lon"]))[:40]
+    except Exception:
+        return [{"ident":k,"name":v[2],"lat":v[0],"lon":v[1]} for k,v in KNOWN_AIRPORTS.items()
+                if haversine_nm(lat,lon,v[0],v[1])<=radius_nm]
+
+def nearby_navaids(lat,lon,radius_nm=30):
+    try:
+        rows=_csv_rows("https://davidmegginson.github.io/ourairports-data/navaids.csv")
+        out=[]
+        for x in rows:
+            try:
+                a=float(x.get("latitude_deg") or 0);b=float(x.get("longitude_deg") or 0)
+                if haversine_nm(lat,lon,a,b)<=radius_nm:
+                    out.append({"ident":x.get("ident") or "NAVAID","name":x.get("name") or "",
+                                "lat":a,"lon":b,"type":x.get("type") or ""})
+            except (ValueError,TypeError): continue
+        return out[:60]
+    except Exception:return []
+
+def fetch_airspaces(lat,lon,radius_nm=50,api_key=""):
+    if not api_key:return []
+    try:
+        # OpenAIP is optional because its API requires the user's own key.
+        url="https://api.core.openaip.net/api/airspaces?bbox=%f,%f,%f,%f&limit=100" % (
+            lon-radius_nm/60,lat-radius_nm/60,lon+radius_nm/60,lat+radius_nm/60)
+        req=urllib.request.Request(url,headers={"User-Agent":"AeroflyATC/2.2","x-openaip-api-key":api_key})
+        with urllib.request.urlopen(req,timeout=12) as r:
+            data=json.loads(r.read().decode())
+        out=[]
+        for x in data.get("items",data if isinstance(data,list) else []):
+            out.append({"name":x.get("name","AIRSPACE"),"lower":str(x.get("lowerCeiling","")),
+                        "upper":str(x.get("upperCeiling",""))})
+        return out
+    except Exception:return []
