@@ -9,6 +9,11 @@ import traceback
 import urllib.request
 import urllib.parse
 
+try:
+    import advanced_features as adv
+except Exception:
+    adv = None
+
 from kivy.app import App
 from kivy.clock import Clock
 from kivy.graphics import Color, Ellipse, Line, Rectangle, RoundedRectangle, Triangle
@@ -424,9 +429,9 @@ class AviationMap(Widget):
             self.center_lat=d.get("lat",0);self.center_lon=d.get("lon",0)
         elif not self.center_lat:
             self.center_lat=.0424;self.center_lon=32.4435
-        self.airports=adv.nearby_airports(self.center_lat,self.center_lon,8)
-        self.navaids=adv.nearby_navaids(self.center_lat,self.center_lon,8)
-        self.airspaces=adv.fetch_airspaces(self.center_lat,self.center_lon,3,self.app_ref.openaip_key)
+        self.airports=adv.nearby_airports(self.center_lat,self.center_lon,8) if adv else []
+        self.navaids=adv.nearby_navaids(self.center_lat,self.center_lon,8) if adv else []
+        self.airspaces=adv.fetch_airspaces(self.center_lat,self.center_lon,3,self.app_ref.openaip_key) if adv else []
         self.load_visible_tiles();self.redraw()
 
     def set_data(self,d):
