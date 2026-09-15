@@ -226,3 +226,82 @@ def terrain_conflict(aircraft_alt_ft,lat,lon,heading_deg,agl_margin_ft=1000):
     if min_clear < 0:return {"status":"CRITICAL","clearance_ft":min_clear,"distance_nm":worst["distance_nm"]}
     if min_clear < agl_margin_ft:return {"status":"WARNING","clearance_ft":min_clear,"distance_nm":worst["distance_nm"]}
     return {"status":"CLEAR","clearance_ft":min_clear,"distance_nm":worst["distance_nm"]}
+
+
+# AIRAC navigation-data service. The public AIRAC API is cycle-aware and returns
+# current worldwide waypoints, navaids, airways, airports and procedures.
+AIRAC_BASE = "https://airac.net/api/v1"
+
+def _airac_get(path, params=None):
+    try:
+        q=urllib.parse.urlencode(params or {}, doseq=True)
+        url=AIRAC_BASE+path+("?" + q if q else "")
+        req=urllib.request.Request(url, headers={
+            "Accept":"application/json",
+            "User-Agent":"AeroflyATC/2.2 (Aerofly mobile ATC companion)"
+        })
+        with urllib.request.urlopen(req,timeout=12) as r:
+            payload=json.loads(r.read().decode())
+            cycle=r.headers.get("X-AIRAC-Cycle")
+        return payload,cycle
+    except Exception:
+        return None,None
+
+def current_airac():
+    data,cycle=_airac_get("/airac/current")
+    return (data or {}).get("data",data),cycle
+
+def nearby_navdata(lat,lon,radius_nm=30):
+    result={"waypoints":[],"navaids":[],"airports":[],"airways":[],"cycle":None}
+    for kind in ("waypoints","navaids","airports"):
+        data,cycle=_airac_get("/"+kind+"/nearby",{
+            "latitude":lat,"longitude":lon,"radius":radius_nm
+        })
+        if data:
+            result[kind]=data.get("data",[]) if isinstance(data,dict) else data
+        result["cycle"]=cycle or result["cycle"]
+    return result
+
+def search_navdata(query):
+    data,cycle=_airac_get("/search",{"q":query,"limit":20})
+    return (data or {}).get("data",data),cycle
+
+def airway_for_fix(fix):
+    data,cycle=_airac_get("/airways",{"fix":fix})
+    return (data or {}).get("data",data),cycle
+
+def parse_route(origin,destination,route,departure_runway="",arrival_runway=""):
+    params={"origin":origin,"destination":destination,"route":route}
+    if departure_runway: params["departure_runway"]=departure_runway
+    if arrival_runway: params["arrival_runway"]=arrival_runway
+    data,cycle=_airac_get("/routes/parse",params)
+    return (data or {}).get("data",data),cycle
+
+def airport_procedures(airport,procedure_type=None):
+    p={"airport":airport}
+    if procedure_type:p["type"]=procedure_type
+    data,cycle=_airac_get("/procedures",p)
+    return (data or {}).get("data",data),cycle
+
+def route_direct_instruction(fix, lat, lon):
+    data,cycle=search_navdata(fix)
+    matches=[]
+    if isinstance(data,dict):
+        for k in ("waypoints","navaids","airports"):
+            matches.extend(data.get(k,[]) or [])
+    elif isinstance(data,list):
+        matches=data
+    if not matches:
+        return {"ok":False,"reason":"fix_not_found","cycle":cycle}
+    best=None;best_dist=1e9
+    for x in matches:
+        co=x.get("coordinates",{})
+        la=co.get("lat",x.get("latitude"))
+        lo=co.get("lon",x.get("longitude"))
+        if la is None or lo is None:continue
+        d=haversine_nm(lat,lon,float(la),float(lo))
+        if d<best_dist:
+            best_dist=d;best=x
+    if not best:return {"ok":False,"reason":"coordinates_unavailable","cycle":cycle}
+    return {"ok":True,"instruction":"DIRECT "+str(best.get("identifier") or best.get("icao") or fix),
+            "fix":best,"distance_nm":round(best_dist,1),"cycle":cycle}
