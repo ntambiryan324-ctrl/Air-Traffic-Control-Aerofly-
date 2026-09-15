@@ -327,6 +327,28 @@ class Copilot:
             if match:
                 self.clearance["altitude_ft"] = int(match.group(1))
 
+    def navigation_context(self, navdata):
+        # Compact structured context suitable for an AI ATC prompt.
+        return {
+            "airac_cycle": navdata.get("cycle"),
+            "nearby_waypoints": [
+                {"id":x.get("identifier"),"lat":x.get("coordinates",{}).get("lat"),
+                 "lon":x.get("coordinates",{}).get("lon")}
+                for x in (navdata.get("waypoints",[]) or [])[:80]
+            ],
+            "nearby_navaids": [
+                {"id":x.get("identifier"),"type":x.get("type",{}).get("code") if isinstance(x.get("type"),dict) else x.get("type"),
+                 "lat":x.get("coordinates",{}).get("lat"),"lon":x.get("coordinates",{}).get("lon")}
+                for x in (navdata.get("navaids",[]) or [])[:50]
+            ],
+            "airways": navdata.get("airways",[]) or []
+        }
+
+    def direct_fix(self, fix, lat, lon):
+        if not fix or lat is None or lon is None:
+            return None
+        return adv.route_direct_instruction(str(fix).upper(),float(lat),float(lon)) if adv else None
+
     def monitor(self, data):
         phase = data.get("phase")
         if phase != self.last_phase:
@@ -696,7 +718,16 @@ class CommsScreen(Screen):
     def send(self,*_):
         t=self.input.text.strip()
         if t:
-            self.chat.text+=f"\n\nPILOT\n{t}";self.input.text="";self.app_ref.copilot.observe_atc(t)
+            self.chat.text+=f"\n\nPILOT\n{t}";self.input.text=""
+            m=re.match(r"(?i)direct\\s+([A-Z0-9]{2,7})",t)
+            if m and hasattr(self.app_ref,"map"):
+                d=self.app_ref.telemetry.snapshot()
+                result=self.app_ref.copilot.direct_fix(m.group(1),d.get("lat"),d.get("lon"))
+                if result and result.get("ok"):
+                    self.chat.text+=f"\n\nNAV DATA • AIRAC {result.get('cycle')}\n{result['instruction']} • {result['distance_nm']} NM"
+                else:
+                    self.chat.text+="\n\nNAV DATA • FIX NOT RESOLVED"
+            self.app_ref.copilot.observe_atc(t)
 
 
 class ScratchCanvas(Widget):
