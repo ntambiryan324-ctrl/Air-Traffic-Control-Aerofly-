@@ -5,12 +5,17 @@ on:
     branches: [main]
   workflow_dispatch:
 
+concurrency:
+  group: aerofly-android-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
 jobs:
   build:
     runs-on: ubuntu-22.04
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -36,7 +41,7 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install "buildozer==1.5.0" "cython==0.29.34"
 
-      - name: Static checks
+      - name: Static source checks
         run: |
           python -m py_compile main.py aviation_features.py pro_ui.py advanced_features.py operations_ui.py efb_frontend.py
           python -m compileall -q main.py aviation_features.py pro_ui.py advanced_features.py operations_ui.py efb_frontend.py
@@ -48,16 +53,20 @@ jobs:
           PY
 
       - name: Build debug APK
-        env:
-          P4A_RELEASE: "master"
         run: |
           rm -rf .buildozer bin
-          buildozer -v android debug
+          buildozer -v --debug android debug
 
       - name: Verify APK
         run: |
-          test -n "$(find bin -maxdepth 1 -type f -name '*.apk' -print -quit)"
+          APK="$(find bin -maxdepth 1 -type f -name '*.apk' -print -quit)"
+          test -n "$APK"
           ls -lh bin/*.apk
+          echo "APK=$APK" >> "$GITHUB_ENV"
+
+      - name: Inspect APK package
+        run: |
+          command -v aapt2 >/dev/null 2>&1 && aapt2 dump badging "$APK" | head -n 20 || true
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
