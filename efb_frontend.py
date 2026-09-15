@@ -328,13 +328,6 @@ class AeroflyATC(MDApp):
     def set_spoken_text(self,text):
         self.msg.text=text
         self.append_chat("MIC",text)
-
-        try:
-            from jnius import autoclass
-            SR=autoclass("android.speech.SpeechRecognizer");PA=autoclass("org.kivy.android.PythonActivity").mActivity
-            if SR.isRecognitionAvailable(PA):self.append_chat("MIC","Android speech recognition is available. Native recognition session requested.")
-            else:self.append_chat("MIC","Android speech recognition is unavailable on this device.")
-        except Exception as e:self.append_chat("MIC","Speech recognition unavailable: "+str(e))
     def on_stop(self):
         if self.speech_recognizer:
             try:self.speech_recognizer.destroy()
