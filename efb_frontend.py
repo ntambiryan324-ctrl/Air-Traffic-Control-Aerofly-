@@ -147,7 +147,7 @@ class AeroflyATC(MDApp):
     def build(self):
         self.theme_cls.theme_style="Dark";self.theme_cls.primary_palette="Amber";self.theme_cls.accent_palette="Amber"
         self.settings_dir=self.user_data_dir;os.makedirs(self.settings_dir,exist_ok=True)
-        self.telemetry=Telemetry() if Telemetry else None;self.alert_engine=adv.FlightAlertEngine();self.clearance=adv.ClearanceTracker();self.route=[];self.chat=[];self.flight_log=None
+        self.telemetry=Telemetry() if Telemetry else None;self.alert_engine=adv.FlightAlertEngine();self.clearance=adv.ClearanceTracker();self.route=[];self.chat=[];self.datalink=[];self.flight_logger=adv.FlightLogger(os.path.join(self.settings_dir,"flight_log.jsonl"));self.recording=False;self.speech_recognizer=None;self.speech_listener=None
         self.gemini_key=self.load("gemini_key","");self.gemini_model=self.load("gemini_model","gemini-3.6-flash");self.openaip_key=self.load("openaip_key","")
         sm=ScreenManager(transition=FadeTransition(duration=.08))
         for name,fn in (("home",self.home_screen),("flight",self.flight_screen),("comms",self.comms_screen),("scratch",self.scratch_screen),("airports",self.airports_screen),("settings",self.settings_screen)):
@@ -175,7 +175,11 @@ class AeroflyATC(MDApp):
         self.home_fields={}
         for k in ("CONNECTION","AI ATC","FLIGHT LOG","WEATHER"):
             p=BoxLayout(orientation="vertical",padding=dp(10),spacing=dp(4));bg(p,PANEL);p.add_widget(label(k,9,MUTED,True));v=label("OFFLINE" if k=="CONNECTION" else ("READY" if k=="AI ATC" else "NO DATA"),16,AMBER if k=="CONNECTION" else WHITE,True);p.add_widget(v);self.home_fields[k]=v;g.add_widget(p)
-        body.add_widget(g);body.add_widget(Widget());return self.shell("AeroflyATC",body)
+        body.add_widget(g)
+        ops=BoxLayout(size_hint_y=None,height=dp(44),spacing=dp(5))
+        for txt,fn in (("START LOG",self.start_log),("STOP LOG",self.stop_log),("NEAREST",self.nearest_airport)):
+            b=ThemedButton(text=txt,active=txt=="START LOG");b.bind(on_release=lambda _,f=fn:f());ops.add_widget(b)
+        body.add_widget(ops);body.add_widget(Widget());return self.shell("AeroflyATC",body)
     def flight_screen(self):
         body=BoxLayout(orientation="vertical")
         row=BoxLayout(size_hint_y=None,height=dp(42),padding=dp(4),spacing=dp(4))
@@ -213,7 +217,7 @@ class AeroflyATC(MDApp):
     def tick(self,_dt):
         if not self.telemetry:return
         try:
-            d=self.telemetry.snapshot();self.flight_map.update(d,self.telemetry.trail_snapshot(),self.route);self.hud.update(d)
+            d=self.telemetry.snapshot();self.flight_logger.record(d);self.flight_map.update(d,self.telemetry.trail_snapshot(),self.route);self.hud.update(d)
             if d.get("connected"):
                 self.flight_status.text="CONNECTED • %s • %s • %s"%(d.get("transport",""),d.get("source_ip",""),d.get("phase",""))
                 self.home_conn.text="FLIGHT DETECTED";self.home_detail.text="Aerofly telemetry active via "+d.get("transport","")
@@ -226,10 +230,29 @@ class AeroflyATC(MDApp):
         except Exception as e:self.flight_status.text="RECOVERED: "+str(e)[:80]
     def append_chat(self,who,text):
         self.chat.append((who,text));self.chat=self.chat[-50:];self.chat_label.text="\n\n".join("[{}]\n{}".format(a,b) for a,b in self.chat);self.chat_label.texture_update();self.chat_label.height=max(dp(220),self.chat_label.texture_size[1]+dp(15))
+    def start_log(self):
+        self.flight_logger.start();self.recording=True;self.append_chat("LOGGER","Flight recording started.")
+    def stop_log(self):
+        self.flight_logger.stop();self.recording=False;self.append_chat("LOGGER","Flight recording stopped.")
+    def nearest_airport(self):
+        if not self.telemetry:return
+        d=self.telemetry.snapshot()
+        if not d.get("connected"):self.append_chat("NAV","No live aircraft position.");return
+        n=adv.nearest_airport(d["lat"],d["lon"])
+        if n:self.append_chat("NAV","Nearest airport: %s %s • %.1f NM"%(n[1],n[2],n[0]))
+    def add_route(self):
+        raw=self.route_q.text.strip().upper()
+        pts=[]
+        for code in raw.replace(","," ").split():
+            if code in adv.KNOWN_AIRPORTS:
+                a,b,_=adv.KNOWN_AIRPORTS[code];pts.append((a,b))
+        if len(pts)>=1:
+            self.route.extend(pts);self.flight_map.route=self.route;self.flight_map.redraw();self.append_chat("ROUTE","Added %d route point(s). Total distance %.1f NM"%(len(pts),adv.route_distance(self.route) if len(self.route)>1 else 0))
+        else:self.append_chat("ROUTE","Unknown ICAO. Use a supported airport code.")
     def send_message(self):
         m=self.msg.text.strip()
         if not m:return
-        self.append_chat("PILOT",m);self.msg.text=""
+        self.append_chat("PILOT",m);self.datalink.append({"time":time.time(),"channel":"ATC","message":m});self.msg.text=""
         if self.clearance.current:self.append_chat("READBACK","CORRECT" if self.clearance.readback(m) else "NOT VERIFIED")
         if self.gemini_key:self.ask_gemini(m)
     def ask_gemini(self,prompt):
@@ -270,12 +293,54 @@ class AeroflyATC(MDApp):
         threading.Thread(target=work,daemon=True).start()
     def speech_to_text(self):
         try:
+            from jnius import autoclass, PythonJavaClass, java_method
+            from android.permissions import request_permissions, Permission
+            request_permissions([Permission.RECORD_AUDIO])
+            SpeechRecognizer=autoclass("android.speech.SpeechRecognizer"); Intent=autoclass("android.content.Intent"); RecognizerIntent=autoclass("android.speech.RecognizerIntent"); Activity=autoclass("org.kivy.android.PythonActivity").mActivity
+            if not SpeechRecognizer.isRecognitionAvailable(Activity):self.append_chat("MIC","Android speech recognition is unavailable.");return
+            app=self
+            class Listener(PythonJavaClass):
+                __javainterfaces__=["android/speech/RecognitionListener"]
+                @java_method("(Landroid/os/Bundle;)V")
+                def onReadyForSpeech(self,b): pass
+                @java_method("()V")
+                def onBeginningOfSpeech(self): pass
+                @java_method("(F)V")
+                def onRmsChanged(self,v): pass
+                @java_method("([B)V")
+                def onBufferReceived(self,b): pass
+                @java_method("()V")
+                def onEndOfSpeech(self): pass
+                @java_method("(I)V")
+                def onError(self,e): Clock.schedule_once(lambda *_:app.append_chat("MIC","Recognition error code %s"%e),0)
+                @java_method("(Landroid/os/Bundle;)V")
+                def onResults(self,b):
+                    arr=b.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                    if arr and arr.size()>0: Clock.schedule_once(lambda *_:app.set_spoken_text(str(arr.get(0))),0)
+                @java_method("(Landroid/os/Bundle;)V")
+                def onPartialResults(self,b): pass
+                @java_method("(ILandroid/os/Bundle;)V")
+                def onEvent(self,e,b): pass
+            self.speech_listener=Listener();self.speech_recognizer=SpeechRecognizer.createSpeechRecognizer(Activity);self.speech_recognizer.setRecognitionListener(self.speech_listener)
+            intent=Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL,RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE,"en-US");self.speech_recognizer.startListening(intent)
+            self.append_chat("MIC","Listening…")
+        except Exception as e:self.append_chat("MIC","Speech recognition unavailable: "+str(e))
+    def set_spoken_text(self,text):
+        self.msg.text=text
+        self.append_chat("MIC",text)
+
+        try:
             from jnius import autoclass
             SR=autoclass("android.speech.SpeechRecognizer");PA=autoclass("org.kivy.android.PythonActivity").mActivity
             if SR.isRecognitionAvailable(PA):self.append_chat("MIC","Android speech recognition is available. Native recognition session requested.")
             else:self.append_chat("MIC","Android speech recognition is unavailable on this device.")
         except Exception as e:self.append_chat("MIC","Speech recognition unavailable: "+str(e))
     def on_stop(self):
+        if self.speech_recognizer:
+            try:self.speech_recognizer.destroy()
+            except Exception:pass
+        self.flight_logger.stop()
+
         if self.telemetry:
             try:self.telemetry.stop()
             except Exception:pass
