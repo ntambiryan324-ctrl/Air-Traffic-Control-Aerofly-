@@ -6,10 +6,12 @@ import socket
 import threading
 import time
 import traceback
+import urllib.request
+import urllib.parse
 
 from kivy.app import App
 from kivy.clock import Clock
-from kivy.graphics import Color, Ellipse, Line, Rectangle
+from kivy.graphics import Color, Ellipse, Line, Rectangle, RoundedRectangle, Triangle
 from kivy.metrics import dp
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.button import Button
@@ -18,6 +20,7 @@ from kivy.uix.label import Label
 from kivy.uix.screenmanager import Screen, ScreenManager, SlideTransition
 from kivy.uix.textinput import TextInput
 from kivy.uix.widget import Widget
+from kivy.uix.floatlayout import FloatLayout
 
 
 TELEMETRY_PORT = 58585
