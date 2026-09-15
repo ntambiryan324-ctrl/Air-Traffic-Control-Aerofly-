@@ -185,3 +185,44 @@ def fetch_airspaces(lat,lon,radius_nm=50,api_key=""):
                         "upper":str(x.get("upperCeiling",""))})
         return out
     except Exception:return []
+
+
+def terrain_elevation(lat, lon):
+    """Free worldwide 90m Copernicus DEM via Open-Meteo; no API key."""
+    try:
+        q=urllib.parse.urlencode({"latitude":lat,"longitude":lon})
+        req=urllib.request.Request("https://api.open-meteo.com/v1/elevation?"+q,
+            headers={"User-Agent":"AeroflyATC/2.2"})
+        with urllib.request.urlopen(req,timeout=8) as r:
+            d=json.loads(r.read().decode())
+        vals=d.get("elevation") or []
+        return float(vals[0]) if vals else None
+    except Exception:
+        return None
+
+def terrain_profile(lat,lon,heading_deg,distance_nm=20,samples=21):
+    """Sample terrain ahead along the aircraft track."""
+    out=[]
+    R=3440.065
+    h=math.radians(heading_deg)
+    for i in range(samples):
+        d=distance_nm*i/(samples-1)
+        dr=d/R
+        la=math.asin(math.sin(math.radians(lat))*math.cos(dr)+
+                     math.cos(math.radians(lat))*math.sin(dr)*math.cos(h))
+        lo=math.radians(lon)+math.atan2(math.sin(h)*math.sin(dr)*math.cos(math.radians(lat)),
+                                        math.cos(dr)-math.sin(math.radians(lat))*math.sin(la))
+        e=terrain_elevation(math.degrees(la),math.degrees(lo))
+        out.append({"distance_nm":d,"lat":math.degrees(la),"lon":math.degrees(lo),"elevation_ft":e})
+    return out
+
+def terrain_conflict(aircraft_alt_ft,lat,lon,heading_deg,agl_margin_ft=1000):
+    profile=terrain_profile(lat,lon,heading_deg)
+    valid=[p for p in profile if p["elevation_ft"] is not None]
+    if not valid:return {"status":"UNKNOWN","reason":"terrain data unavailable"}
+    clearance=[aircraft_alt_ft-p["elevation_ft"] for p in valid]
+    min_clear=min(clearance)
+    worst=valid[clearance.index(min_clear)]
+    if min_clear < 0:return {"status":"CRITICAL","clearance_ft":min_clear,"distance_nm":worst["distance_nm"]}
+    if min_clear < agl_margin_ft:return {"status":"WARNING","clearance_ft":min_clear,"distance_nm":worst["distance_nm"]}
+    return {"status":"CLEAR","clearance_ft":min_clear,"distance_nm":worst["distance_nm"]}
