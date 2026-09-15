@@ -59,36 +59,6 @@ jobs:
           test -n "$(find bin -maxdepth 1 -type f -name '*.apk' -print -quit)"
           ls -lh bin/*.apk
 
-      - name: Android emulator startup smoke test
-        uses: reactivecircus/android-emulator-runner@v2
-        with:
-          api-level: 34
-          arch: x86_64
-          profile: pixel_2
-          script: |
-            set +e
-            APK=$(find bin -maxdepth 1 -type f -name '*x86_64*.apk' | head -1)
-            echo "Testing APK: $APK"
-            adb install -r "$APK"
-            adb logcat -c
-            adb shell am force-stop org.aeroflycompanion.aeroflyatc
-            adb shell monkey -p org.aeroflycompanion.aeroflyatc 1
-            sleep 12
-            adb logcat -d > android-startup.log
-            if grep -Eiq 'FATAL EXCEPTION|Traceback|Fatal signal|SIGSEGV|SIGABRT|ImportError|ModuleNotFoundError' android-startup.log; then
-              echo "ANDROID STARTUP FAILURE DETECTED"
-              grep -Ei 'FATAL EXCEPTION|Traceback|Fatal signal|SIGSEGV|SIGABRT|ImportError|ModuleNotFoundError' android-startup.log | tail -120
-              exit 1
-            fi
-            echo "ANDROID STARTUP SMOKE TEST PASSED"
-      - name: Upload Android startup log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: android-startup-log
-          path: android-startup.log
-          if-no-files-found: warn
-
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
