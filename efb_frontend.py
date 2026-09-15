@@ -25,22 +25,20 @@ AMBER=(1,0.694,0,1); WHITE=(1,1,1,1); MUTED=(0.50,0.50,0.50,1)
 GREEN=(0.30,0.90,0.52,1); BLUE=(0.20,0.65,1,1); RED=(1,0.25,0.25,1)
 
 KV = r"""
-<ThemedButton@Button>:
+<ThemedButton>:
     background_normal: ""
     background_down: ""
     background_color: (1,0.694,0,1) if root.active else (0.145,0.145,0.145,1)
     color: (0.05,0.05,0.05,1) if root.active else (1,1,1,1)
     font_size: "10sp"
     bold: root.active
-<ThemedInput@TextInput>:
+<ThemedInput>:
     background_color: 0.102,0.102,0.102,1
     foreground_color: 1,1,1,1
     hint_text_color: 0.40,0.40,0.40,1
     cursor_color: 1,0.694,0,1
     padding: dp(10),dp(10)
 """
-Builder.load_string(KV)
-
 class ThemedButton(Button):
     active=BooleanProperty(False)
 class ThemedInput(TextInput):
@@ -145,6 +143,7 @@ class BaseScreen(Screen):pass
 class AeroflyATC(MDApp):
     tab=StringProperty("flight")
     def build(self):
+        Builder.load_string(KV)
         self.theme_cls.theme_style="Dark";self.theme_cls.primary_palette="Amber";self.theme_cls.accent_palette="Amber"
         self.settings_dir=self.user_data_dir;os.makedirs(self.settings_dir,exist_ok=True)
         self.telemetry=Telemetry() if Telemetry else None;self.alert_engine=adv.FlightAlertEngine();self.clearance=adv.ClearanceTracker();self.route=[];self.chat=[];self.datalink=[];self.flight_logger=adv.FlightLogger(os.path.join(self.settings_dir,"flight_log.jsonl"));self.recording=False;self.speech_recognizer=None;self.speech_listener=None
