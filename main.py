@@ -756,5 +756,6 @@ class AeroflyCompanion(App):
 
 
 if __name__ == "__main__":
-    from pro_ui import ProAeroflyApp
-    ProAeroflyApp().run()
+    # UI-first launcher: optional network/AI services are not started here.
+    from efb_frontend import AeroflyATC
+    AeroflyATC().run()
