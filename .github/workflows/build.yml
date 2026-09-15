@@ -43,11 +43,11 @@ jobs:
 
       - name: Static source checks
         run: |
-          python -m py_compile main.py aviation_features.py pro_ui.py advanced_features.py operations_ui.py efb_frontend.py
-          python -m compileall -q main.py aviation_features.py pro_ui.py advanced_features.py operations_ui.py efb_frontend.py
+          python -m py_compile main.py legacy_main.py aviation_features.py pro_ui.py advanced_features.py operations_ui.py efb_frontend.py
+          python -m compileall -q main.py legacy_main.py aviation_features.py pro_ui.py advanced_features.py operations_ui.py efb_frontend.py
           python - <<'PY'
           import ast
-          for path in ("main.py", "aviation_features.py", "pro_ui.py", "advanced_features.py", "operations_ui.py", "efb_frontend.py"):
+          for path in ("main.py", "legacy_main.py", "aviation_features.py", "pro_ui.py", "advanced_features.py", "operations_ui.py", "efb_frontend.py"):
               ast.parse(open(path, encoding="utf-8").read(), filename=path)
           print("Python source checks passed")
           PY
