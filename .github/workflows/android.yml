@@ -1,0 +1,67 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: System dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git zip unzip openjdk-17-jdk python3-pip autoconf automake libtool pkg-config zlib1g-dev libncurses5-dev libncursesw5-dev cmake libffi-dev libssl-dev
+
+      - name: Python build tools
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install buildozer==1.5.0 cython==0.29.34
+
+      - name: Static source checks
+        run: |
+          python -m py_compile main.py legacy_main.py aviation_features.py pro_ui.py advanced_features.py operations_ui.py efb_frontend.py
+
+      - name: Build debug APK
+        env:
+          BUILDOZER_WARN_ON_ROOT: '0'
+        run: |
+          buildozer -v --debug android debug
+
+      - name: Verify APK
+        run: |
+          APK=$(find bin -maxdepth 1 -type f -name '*.apk' | head -n 1)
+          test -n "$APK"
+          echo "APK=$APK"
+          ls -lh "$APK"
+
+      - name: Inspect APK package
+        run: |
+          APK=$(find bin -maxdepth 1 -type f -name '*.apk' | head -n 1)
+          $ANDROID_HOME/build-tools/35.0.0/aapt2 dump badging "$APK" | head -n 20
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: aerofly-atc-debug-apk
+          path: bin/*.apk
+          if-no-files-found: error
