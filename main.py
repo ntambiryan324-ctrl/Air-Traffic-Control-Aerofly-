@@ -766,6 +766,34 @@ class AeroflyCompanion(App):
         try:
             d=self.telemetry.snapshot();self.screens["flight"].refresh(d,self.telemetry.trail_snapshot())
         except Exception as e:self._write_crash_log(e)
+    def cycle_map_layer(self):
+        layers=["osm","satellite","dark"]
+        i=layers.index(self.map.base_layer)
+        self.map.set_base_layer(layers[(i+1)%len(layers)])
+
+    def cycle_weather_layer(self):
+        modes=[None,"clouds","precipitation","winds"]
+        i=modes.index(self.map.weather_mode)
+        self.map.set_weather_mode(modes[(i+1)%len(modes)])
+
+    def request_weather_layer(self,mode):
+        if not mode:
+            self.map.weather={"clouds":None,"precipitation":None,"wind_speed":None,"wind_dir":None}
+            self.map.redraw()
+            return
+        lat,lon=self.map.center_lat,self.map.center_lon
+        def work():
+            try:
+                q=urllib.parse.urlencode({"latitude":lat,"longitude":lon,"current":"cloud_cover,precipitation,wind_speed_10m,wind_direction_10m","timezone":"UTC"})
+                req=urllib.request.Request("https://api.open-meteo.com/v1/forecast?"+q,headers={"User-Agent":"AeroflyATC/2.2"})
+                with urllib.request.urlopen(req,timeout=10) as r:d=json.loads(r.read().decode())
+                x=d.get("current",{})
+                self.map.weather={"clouds":x.get("cloud_cover"),"precipitation":x.get("precipitation"),"wind_speed":x.get("wind_speed_10m"),"wind_dir":x.get("wind_direction_10m")}
+                Clock.schedule_once(lambda *_:self.map.redraw(),0)
+            except Exception:
+                pass
+        threading.Thread(target=work,daemon=True).start()
+
     def request_weather(self):
         d=self.telemetry.snapshot();icao=d.get("destination") or "HUEN"
         self.screens["comms"].chat.text+="\\n\\nWEATHER\\nFetching METAR/TAF for "+icao
