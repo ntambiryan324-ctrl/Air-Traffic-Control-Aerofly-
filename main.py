@@ -583,9 +583,10 @@ class MapOverlay(BoxLayout):
         top=BoxLayout(size_hint_y=None,height=dp(34),spacing=dp(4))
         for txt,fn in (("−",lambda:self.app_ref.map.zoom_by(-1)),("+",lambda:self.app_ref.map.zoom_by(1)),
                        ("CENTER",lambda:self.app_ref.map.center_on_aircraft()),
-                       ("AIRSPACE",lambda:self.app_ref.map.refresh_data()),
-                       ("WX",lambda:self.app_ref.request_weather())):
-            b=Button(text=txt,size_hint_x=None,width=dp(58),background_normal="",background_color=(.05,.05,.06,.88),color=TEXT)
+                       ("MAP",lambda:self.app_ref.cycle_map_layer()),
+                       ("WX",lambda:self.app_ref.cycle_weather_layer()),
+                       ("IFR",lambda:self.app_ref.map.toggle_ifr())):
+            b=Button(text=txt,size_hint_x=None,width=dp(52),background_normal="",background_color=(.05,.05,.06,.90),color=TEXT,font_size="8sp")
             b.bind(on_press=lambda _,f=fn:f());top.add_widget(b)
         self.add_widget(top)
         self.labels=GridLayout(cols=1,size_hint_y=1)
