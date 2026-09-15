@@ -756,6 +756,5 @@ class AeroflyCompanion(App):
 
 
 if __name__ == "__main__":
-    # UI-first launcher: optional network/AI services are not started here.
-    from efb_frontend import AeroflyATC
-    AeroflyATC().run()
+    # Stable Android entry point. Optional services start after the first frame.
+    AeroflyCompanion().run()
