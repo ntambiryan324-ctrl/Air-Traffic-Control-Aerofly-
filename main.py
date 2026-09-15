@@ -479,9 +479,15 @@ class AviationMap(Widget):
                     except Exception: pass
             finally:
                 def apply(_dt):
-                    self.airports=airports; self.navaids=navaids; self.airspaces=airspaces
+                    self.airports=airports if isinstance(airports,list) else []
+                    self.navaids=navaids if isinstance(navaids,list) else []
+                    self.airspaces=airspaces if isinstance(airspaces,list) else []
                     self.navdata=navdata if isinstance(navdata,dict) else self.navdata
-                    self._refresh_busy=False; self.redraw()
+                    self._refresh_busy=False
+                    try:
+                        self.redraw()
+                    except Exception as exc:
+                        self.app_ref._write_crash_log(exc)
                 Clock.schedule_once(apply,0)
         threading.Thread(target=work,daemon=True).start()
         self.load_visible_tiles()
