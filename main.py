@@ -420,6 +420,8 @@ class AviationMap(Widget):
         self.app_ref=app_ref;self.data={};self.zoom=9;self.center_lat=0.0;self.center_lon=0.0
         self.drag_start=None;self.tiles={};self.airports=[];self.navaids=[];self.airspaces=[];self.follow=True
         self.aircraft_heading=0
+        self.navdata={'waypoints':[],'navaids':[],'airports':[],'airways':[],'cycle':None}
+        self.navdata_loading=False
         self.base_layer='osm'
         self.theme_mode='dark'
         self.weather_mode=None
@@ -438,6 +440,18 @@ class AviationMap(Widget):
         self.navaids=adv.nearby_navaids(self.center_lat,self.center_lon,8) if adv else []
         self.airspaces=adv.fetch_airspaces(self.center_lat,self.center_lon,3,self.app_ref.openaip_key) if adv else []
         self.load_visible_tiles();self.redraw()
+        if adv and not self.navdata_loading:
+            self.navdata_loading=True
+            lat,lon=self.center_lat,self.center_lon
+            def load_nav():
+                try:
+                    self.navdata=adv.nearby_navdata(lat,lon,35)
+                except Exception:
+                    pass
+                finally:
+                    self.navdata_loading=False
+                    Clock.schedule_once(lambda *_: self.redraw(),0)
+            threading.Thread(target=load_nav,daemon=True).start()
 
     def set_data(self,d):
         self.data=d
@@ -521,11 +535,18 @@ class AviationMap(Widget):
                     Color(*ACCENT);Ellipse(pos=(sx-3,sy-3),size=(6,6))
                     # labels are rendered as a separate Label layer below
             if self.ifr_visible:
-                for n in self.navaids:
+                for n in (self.navdata.get("navaids",[]) or []):
                     sx,sy=self.screen(n["lat"],n["lon"])
                     if self.x-20<sx<self.right+20 and self.y-20<sy<self.top+20:
                         Color(0.25,0.85,1.0,0.9)
                         Line(circle=(sx,sy,dp(5)),width=1)
+                for w in (self.navdata.get("waypoints",[]) or []):
+                    co=w.get("coordinates",{})
+                    la=co.get("lat",w.get("latitude")); lo=co.get("lon",w.get("longitude"))
+                    if la is not None and lo is not None:
+                        sx,sy=self.screen(float(la),float(lo))
+                        if self.x-15<sx<self.right+15 and self.y-15<sy<self.top+15:
+                            Color(1,0.65,0.15,0.75);Line(points=[sx-dp(3),sy,sx+dp(3),sy],width=1)
                 for a in self.airspaces:
                     pass
             wx=self.weather
