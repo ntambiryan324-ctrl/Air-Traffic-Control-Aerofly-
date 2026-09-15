@@ -450,30 +450,42 @@ class AviationMap(Widget):
         self.weather={'clouds':None,'precipitation':None,'wind_speed':None,'wind_dir':None}
         self.ifr_visible=True
         self.bind(pos=lambda *_:self.redraw(),size=lambda *_:self.redraw())
-        Clock.schedule_once(lambda *_:self.refresh_data(),.2)
+        Clock.schedule_once(lambda *_:self.refresh_data(),1.0)
 
     def refresh_data(self):
-        d=self.data
-        if d.get("connected"):
-            self.center_lat=d.get("lat",0);self.center_lon=d.get("lon",0)
-        elif not self.center_lat:
-            self.center_lat=.0424;self.center_lon=32.4435
-        self.airports=adv.nearby_airports(self.center_lat,self.center_lon,8) if adv else []
-        self.navaids=adv.nearby_navaids(self.center_lat,self.center_lon,8) if adv else []
-        self.airspaces=adv.fetch_airspaces(self.center_lat,self.center_lon,3,self.app_ref.openaip_key) if adv else []
-        self.load_visible_tiles();self.redraw()
-        if adv and not self.navdata_loading:
-            self.navdata_loading=True
-            lat,lon=self.center_lat,self.center_lon
-            def load_nav():
-                try:
-                    self.navdata=adv.nearby_navdata(lat,lon,35)
-                except Exception:
-                    pass
-                finally:
-                    self.navdata_loading=False
-                    Clock.schedule_once(lambda *_: self.redraw(),0)
-            threading.Thread(target=load_nav,daemon=True).start()
+        if getattr(self, "_refresh_busy", False):
+            return
+        self._refresh_busy=True
+        lat=self.center_lat or .0424
+        lon=self.center_lon or 32.4435
+        if self.data.get("connected"):
+            try:
+                lat=float(self.data.get("lat",lat)); lon=float(self.data.get("lon",lon))
+                self.center_lat=lat; self.center_lon=lon
+            except (TypeError,ValueError):
+                pass
+        self.redraw()
+        def work():
+            airports=[]; navaids=[]; airspaces=[]; navdata=self.navdata
+            try:
+                if adv:
+                    try: airports=adv.nearby_airports(lat,lon,8) or []
+                    except Exception: airports=[]
+                    try: navaids=adv.nearby_navaids(lat,lon,8) or []
+                    except Exception: navaids=[]
+                    try: airspaces=adv.fetch_airspaces(lat,lon,3,getattr(self.app_ref,"openaip_key","")) or []
+                    except Exception: airspaces=[]
+                    try: navdata=adv.nearby_navdata(lat,lon,35) or self.navdata
+                    except Exception: pass
+            finally:
+                def apply(_dt):
+                    self.airports=airports; self.navaids=navaids; self.airspaces=airspaces
+                    self.navdata=navdata if isinstance(navdata,dict) else self.navdata
+                    self._refresh_busy=False; self.redraw()
+                Clock.schedule_once(apply,0)
+        threading.Thread(target=work,daemon=True).start()
+        self.load_visible_tiles()
+
 
     def set_data(self,d):
         self.data=d
@@ -558,7 +570,11 @@ class AviationMap(Widget):
                     # labels are rendered as a separate Label layer below
             if self.ifr_visible:
                 for n in (self.navdata.get("navaids",[]) or []):
-                    sx,sy=self.screen(n["lat"],n["lon"])
+                    co=n.get("coordinates",{}) if isinstance(n,dict) else {}
+                    la=co.get("lat",n.get("latitude")) if isinstance(n,dict) else None
+                    lo=co.get("lon",n.get("longitude")) if isinstance(n,dict) else None
+                    if la is None or lo is None: continue
+                    sx,sy=self.screen(float(la),float(lo))
                     if self.x-20<sx<self.right+20 and self.y-20<sy<self.top+20:
                         Color(0.25,0.85,1.0,0.9)
                         Line(circle=(sx,sy,dp(5)),width=1)
