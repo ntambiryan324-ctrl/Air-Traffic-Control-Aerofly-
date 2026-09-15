@@ -420,6 +420,11 @@ class AviationMap(Widget):
         self.app_ref=app_ref;self.data={};self.zoom=9;self.center_lat=0.0;self.center_lon=0.0
         self.drag_start=None;self.tiles={};self.airports=[];self.navaids=[];self.airspaces=[];self.follow=True
         self.aircraft_heading=0
+        self.base_layer='osm'
+        self.theme_mode='dark'
+        self.weather_mode=None
+        self.weather={'clouds':None,'precipitation':None,'wind_speed':None,'wind_dir':None}
+        self.ifr_visible=True
         self.bind(pos=lambda *_:self.redraw(),size=lambda *_:self.redraw())
         Clock.schedule_once(lambda *_:self.refresh_data(),.2)
 
@@ -457,12 +462,12 @@ class AviationMap(Widget):
     def tile_xy(self,x,y):
         return int(math.floor(x)),int(math.floor(y))
 
-    def load_visible_tiles(self):
+    def load_visible_tiles(self, force=False):
         cx,cy=self.world(self.center_lat,self.center_lon);tx,ty=self.tile_xy(cx,cy)
         for xx in range(tx-2,tx+3):
             for yy in range(ty-2,ty+3):
                 key=(self.zoom,xx,yy)
-                if key in self.tiles: continue
+                if key in self.tiles and not force: continue
                 if xx<0 or yy<0 or xx>=2**self.zoom or yy>=2**self.zoom: continue
                 self.tiles[key]=None
                 threading.Thread(target=self._download_tile,args=(key,),daemon=True).start()
@@ -477,8 +482,13 @@ class AviationMap(Widget):
             if os.path.exists(path) and time.time()-os.path.getmtime(path)<7*86400:
                 data=open(path,"rb").read()
             else:
-                req=urllib.request.Request(f"https://tile.openstreetmap.org/{z}/{x}/{y}.png",
-                    headers={"User-Agent":"AeroflyATC/2.2 (+AeroflyATC mobile companion)"})
+                if self.base_layer == 'satellite':
+                    url=f'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'
+                elif self.base_layer == 'dark':
+                    url=f'https://a.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png'
+                else:
+                    url=f'https://tile.openstreetmap.org/{z}/{x}/{y}.png'
+                req=urllib.request.Request(url, headers={'User-Agent':'AeroflyATC/2.2 (+AeroflyATC mobile companion)'})
                 with urllib.request.urlopen(req,timeout=8) as r:data=r.read()
                 open(path,"wb").write(data)
             from kivy.core.image import Image as CoreImage
@@ -521,6 +531,25 @@ class AviationMap(Widget):
             Color(*AMBER);Triangle(points=[nose[0],nose[1],left[0],left[1],right[0],right[1]])
             Color(1,0.70,0.1,.25);Line(circle=(px,py,dp(34)),width=1.3)
             Color(1,1,1,.65);Line(circle=(px,py,dp(5)),width=1)
+
+    def set_base_layer(self, layer):
+        self.base_layer=layer
+        self.load_visible_tiles(force=True)
+        self.redraw()
+
+    def toggle_theme(self):
+        self.theme_mode='light' if self.theme_mode=='dark' else 'dark'
+        self.redraw()
+
+    def set_weather_mode(self, mode):
+        self.weather_mode=None if self.weather_mode==mode else mode
+        self.app_ref.request_weather_layer(self.weather_mode)
+        self.redraw()
+
+    def toggle_ifr(self):
+        self.ifr_visible=not self.ifr_visible
+        self.refresh_data()
+        self.redraw()
 
     def on_touch_down(self,t):
         if not self.collide_point(*t.pos): return False
