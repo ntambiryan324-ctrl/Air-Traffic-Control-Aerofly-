@@ -3,8 +3,8 @@ from kivy.lang import Builder
 from kivy.clock import Clock
 from kivy.graphics import Color, Line, Rectangle, Ellipse
 from kivy.metrics import dp
-from kivy.properties import StringProperty, BooleanProperty, ListProperty
-from kivy.uix.widget import Widget
+from kivy.properties import StringProperty, BooleanProperty
+from kivy.uix.widget import Widget\nfrom kivy.uix.boxlayout import BoxLayout
 from kivy.uix.screenmanager import ScreenManager, Screen, FadeTransition
 import os
 
@@ -96,10 +96,23 @@ KV = r"""
         active: app.current_tab == "airports"
         on_release: app.switch_tab("airports")
 
-<NavItem@MDIconButton>:
-    icon_size: dp(22)
-    theme_icon_color: "Custom"
-    icon_color: (1,0.694,0,1) if root.active else (0.50,0.50,0.50,1)
+<NavItem>:
+    orientation: "vertical"
+    size_hint_x: 1
+    spacing: dp(0)
+    padding: 0
+    MDIcon:
+        icon: root.icon
+        halign: "center"
+        theme_text_color: "Custom"
+        text_color: (1,0.694,0,1) if root.active else (0.50,0.50,0.50,1)
+        font_size: dp(22)
+    Label:
+        text: root.label
+        color: (1,0.694,0,1) if root.active else (0.50,0.50,0.50,1)
+        font_size: "8sp"
+        size_hint_y: None
+        height: dp(18)
 
 <MyFlight>:
     name: "flight"
@@ -694,7 +707,7 @@ class BottomNav:
 
 class AeroflyATC(MDApp):
     current_tab=StringProperty("flight")
-    mono_font=StringProperty("RobotoMono-Regular.ttf")
+    mono_font=StringProperty("Roboto")
     def build(self):
         self.theme_cls.theme_style="Dark"
         self.theme_cls.primary_palette="Amber"
