@@ -837,7 +837,12 @@ class SettingsScreen(Screen):
         self.app_ref.openaip_key=self.oai.text.strip();self.app_ref.persist_settings();self.app_ref.map.refresh_data();self.app_ref.go("flight")
 
 
-class AeroflyCompanion(App):
+class AeroflyCompanion:
+    @property
+    def user_data_dir(self):
+        app = App.get_running_app()
+        return getattr(app, 'user_data_dir', os.path.join(os.getcwd(), '.aeroflyatc'))
+
     def _write_crash_log(self,exc):
         try:
             with open(os.path.join(self.user_data_dir,"startup_error.log"),"a",encoding="utf8") as f:
