@@ -802,18 +802,29 @@ class SettingsScreen(Screen):
         applyb=Button(text="APPLY",size_hint_x=None,width=dp(70));applyb.bind(on_press=lambda *_:app_ref.telemetry.set_tcp_host(self.host.text));row.add_widget(applyb);conn.add_widget(row)
         conn.add_widget(Label(text="TCP 58585  •  UDP 40092\\nEnable Aerofly flight-data sharing / FSWidgets in Aerofly.",color=MUTED,font_size="9sp"))
         root.add_widget(conn)
-        ai=Card(orientation="vertical",size_hint_y=None,height=dp(175));ai.add_widget(Label(text="AI ATC",color=ACCENT,font_size="11sp",bold=True))
-        self.key=TextInput(text=app_ref.gemini_key,password=True,multiline=False,hint_text="Gemini API key");ai.add_widget(self.key)
-        self.model=TextInput(text=app_ref.gemini_model,multiline=False);ai.add_widget(self.model)
-        save=Button(text="SAVE AI SETTINGS",size_hint_y=None,height=dp(40));save.bind(on_press=self.save_ai);ai.add_widget(save);root.add_widget(ai)
+        ai=Card(orientation="vertical",size_hint_y=None,height=dp(170));ai.add_widget(Label(text="LOCAL AI ATC",color=ACCENT,font_size="11sp",bold=True))
+        self.ai_status=Label(text="Checking local model…",color=MUTED,font_size="9sp");ai.add_widget(self.ai_status)
+        ai.add_widget(Label(text="Qwen2.5 1.5B • Q4_K_M • llama.cpp • NO API KEY",color=TEXT,font_size="9sp"))
+        load=Button(text="DOWNLOAD OFFLINE ATC MODEL (~1.1 GB)",size_hint_y=None,height=dp(40));load.bind(on_press=self.download_local_model);ai.add_widget(load);root.add_widget(ai)
+        Clock.schedule_once(lambda *_:self.refresh_ai_status(),0.2)
         maps=Card(orientation="vertical",size_hint_y=None,height=dp(150));maps.add_widget(Label(text="AVIATION MAP DATA",color=ACCENT,font_size="11sp",bold=True))
         maps.add_widget(Label(text="OpenStreetMap base map • OurAirports airport/runway/navaid data • aviation weather\\nOptional OpenAIP key enables richer airspace geometry.",color=MUTED,font_size="9sp"))
         self.oai=TextInput(text=app_ref.openaip_key,password=True,multiline=False,hint_text="Optional OpenAIP API key");maps.add_widget(self.oai)
         sv=Button(text="SAVE MAP SETTINGS",size_hint_y=None,height=dp(38));sv.bind(on_press=self.save_map);maps.add_widget(sv);root.add_widget(maps)
         root.add_widget(Widget());self.add_widget(root)
-    def save_ai(self,*_):
-        self.app_ref.gemini_key=self.key.text.strip();self.app_ref.gemini_model=self.model.text.strip() or "gemini-3.6-flash"
-        self.app_ref.persist_settings();self.app_ref.go("flight")
+    def refresh_ai_status(self):
+        a=getattr(self.app_ref,"local_atc",None)
+        self.ai_status.text=("LOCAL MODEL READY" if a and a.status().get("model_present") else "LOCAL MODEL NOT DOWNLOADED")
+    def download_local_model(self,*_):
+        a=getattr(self.app_ref,"local_atc",None)
+        if not a:self.ai_status.text="LOCAL AI INITIALIZATION FAILED";return
+        self.ai_status.text="DOWNLOADING MODEL… 0%"
+        def progress(done,total):
+            pct=int(done*100/max(total,1))
+            Clock.schedule_once(lambda *_:setattr(self.ai_status,"text",f"DOWNLOADING MODEL… {pct}%"),0)
+        def done(err):
+            Clock.schedule_once(lambda *_:setattr(self.ai_status,"text","MODEL READY" if not err else "MODEL DOWNLOAD FAILED: "+err[:100]),0)
+        a.download_model_async(progress,done)
     def save_map(self,*_):
         self.app_ref.openaip_key=self.oai.text.strip();self.app_ref.persist_settings();self.app_ref.map.refresh_data();self.app_ref.go("flight")
 
@@ -829,6 +840,12 @@ class AeroflyCompanion(App):
         self.gemini_model=self.load_setting("gemini_model","gemini-3.6-flash")
         self.openaip_key=self.load_setting("openaip_key","")
         self.telemetry=Telemetry();self.copilot=Copilot()
+        try:
+            from local_ai_agent import OfflineATCAgent
+            self.local_atc=OfflineATCAgent(self.user_data_dir, provider=adv)
+        except Exception as e:
+            self.local_atc=None
+            self._write_crash_log(e)
         sm=ScreenManager(transition=SlideTransition(duration=.10));self.screens={}
         for name,fn in (("flight",lambda:MyFlightScreen(self,name="flight")),
                         ("comms",lambda:CommsScreen(self,name="comms")),
