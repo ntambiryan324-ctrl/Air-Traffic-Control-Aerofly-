@@ -805,7 +805,8 @@ class SettingsScreen(Screen):
         ai=Card(orientation="vertical",size_hint_y=None,height=dp(170));ai.add_widget(Label(text="LOCAL AI ATC",color=ACCENT,font_size="11sp",bold=True))
         self.ai_status=Label(text="Checking local model…",color=MUTED,font_size="9sp");ai.add_widget(self.ai_status)
         ai.add_widget(Label(text="Qwen2.5 1.5B • Q4_K_M • llama.cpp • NO API KEY",color=TEXT,font_size="9sp"))
-        load=Button(text="DOWNLOAD OFFLINE ATC MODEL (~1.1 GB)",size_hint_y=None,height=dp(40));load.bind(on_press=self.download_local_model);ai.add_widget(load);root.add_widget(ai)
+        load=Button(text="DOWNLOAD OFFLINE ATC MODEL (~1.1 GB)",size_hint_y=None,height=dp(40));load.bind(on_press=self.download_local_model);ai.add_widget(load)
+        faa=Button(text="UPDATE OFFLINE FAA ATC KNOWLEDGE",size_hint_y=None,height=dp(38));faa.bind(on_press=self.update_faa);ai.add_widget(faa);root.add_widget(ai)
         Clock.schedule_once(lambda *_:self.refresh_ai_status(),0.2)
         maps=Card(orientation="vertical",size_hint_y=None,height=dp(150));maps.add_widget(Label(text="AVIATION MAP DATA",color=ACCENT,font_size="11sp",bold=True))
         maps.add_widget(Label(text="OpenStreetMap base map • OurAirports airport/runway/navaid data • aviation weather\\nOptional OpenAIP key enables richer airspace geometry.",color=MUTED,font_size="9sp"))
@@ -815,6 +816,13 @@ class SettingsScreen(Screen):
     def refresh_ai_status(self):
         a=getattr(self.app_ref,"local_atc",None)
         self.ai_status.text=("LOCAL MODEL READY" if a and a.status().get("model_present") else "LOCAL MODEL NOT DOWNLOADED")
+    def update_faa(self,*_):
+        a=getattr(self.app_ref,"local_atc",None)
+        if not a or not getattr(a,"knowledge",None):self.ai_status.text="FAA KNOWLEDGE INITIALIZATION FAILED";return
+        self.ai_status.text="UPDATING OFFLINE FAA KNOWLEDGE…"
+        def done(err):
+            Clock.schedule_once(lambda *_: setattr(self.ai_status,"text","FAA KNOWLEDGE READY" if not err else "FAA UPDATE FAILED: "+err[:100]),0)
+        a.update_faa_knowledge_async(done)
     def download_local_model(self,*_):
         a=getattr(self.app_ref,"local_atc",None)
         if not a:self.ai_status.text="LOCAL AI INITIALIZATION FAILED";return
