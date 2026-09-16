@@ -1,6 +1,6 @@
 """Offline local ATC agent foundation. No API key is required."""
 from __future__ import annotations
-import json, math, re, threading, urllib.request
+import json, math, re, threading, urllib.request, subprocess, os, time, stat
 from pathlib import Path
 MODEL_REPO="Qwen/Qwen2.5-1.5B-Instruct-GGUF"
 MODEL_FILE="qwen2.5-1.5b-instruct-q4_k_m.gguf"
@@ -44,7 +44,24 @@ class LocalModel:
                 dst.write(b);done+=len(b)
                 if progress:progress(done,total)
         tmp.replace(self.model_path)
+    def start_server(self):
+        if self.process and self.process.poll() is None:return True
+        if not self.model_present or not self.binary_source.exists():return False
+        try:
+            if not self.binary_path.exists():
+                import shutil;shutil.copy2(self.binary_source,self.binary_path)
+                os.chmod(self.binary_path,os.stat(self.binary_path).st_mode|stat.S_IXUSR|stat.S_IXGRP|stat.S_IXOTH)
+            self.process=subprocess.Popen([str(self.binary_path),"-m",str(self.model_path),"--host","127.0.0.1","--port","8089","-c","2048","-t","4","--no-webui"],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+            time.sleep(1.0)
+            return self.process.poll() is None
+        except Exception:return False
+    def stop_server(self):
+        try:
+            if self.process and self.process.poll() is None:self.process.terminate()
+        except Exception:pass
+        self.process=None
     def chat(self,payload,timeout=45):
+        self.start_server()
         try:
             body=json.dumps({"messages":[{"role":"system","content":SYSTEM_PROMPT},{"role":"user","content":json.dumps(payload,separators=(",",":"))}],"temperature":0.15,"top_p":0.85,"max_tokens":180}).encode()
             req=urllib.request.Request(self.server_url+"/v1/chat/completions",data=body,headers={"Content-Type":"application/json"})
@@ -53,12 +70,14 @@ class LocalModel:
 class OfflineATCAgent:
     def __init__(self,data_dir,provider=None):
         self.data_dir=Path(data_dir);self.model=LocalModel(self.data_dir/"models");self.tools=AviationTools(provider)
-    def status(self):return {"local":True,"model":"Qwen2.5-1.5B-Instruct-Q4_K_M","model_present":self.model.model_present,"api_key_required":False}
+    def status(self):
+        return {"local":True,"model":"Qwen2.5-1.5B-Instruct-Q4_K_M","model_present":self.model.model_present,"runtime_present":self.model.binary_source.exists(),"server_running":bool(self.model.process and self.model.process.poll() is None),"api_key_required":False}
     def download_model_async(self,progress=None,done=None):
         def w():
             err=None
             try:self.model.download_model(progress)
             except Exception as e:err=str(e)
+            if not err:self.model.start_server()
             if done:done(err)
         threading.Thread(target=w,daemon=True).start()
     def respond(self,message,aircraft=None,context=None):
