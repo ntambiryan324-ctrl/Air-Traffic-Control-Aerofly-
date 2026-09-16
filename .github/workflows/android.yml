@@ -10,42 +10,59 @@ permissions:
 
 jobs:
   build:
+    name: AeroflyATC APK
     runs-on: ubuntu-22.04
     timeout-minutes: 60
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
       - name: Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11.9"
+
       - name: Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: "17"
+
       - name: System dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y git zip unzip openjdk-17-jdk python3-pip autoconf automake libtool pkg-config zlib1g-dev libncurses5-dev libncursesw5-dev cmake libffi-dev libssl-dev
+          sudo apt-get install -y git zip unzip autoconf automake libtool pkg-config zlib1g-dev libncurses5-dev libncursesw5-dev cmake libffi-dev libssl-dev
+
       - name: Python build tools
         run: |
           python -m pip install --upgrade pip setuptools wheel
-          python -m pip install buildozer==1.5.0 cython==0.29.34
-      - name: Static source checks
-        run: python -m py_compile main.py legacy_main.py aviation_features.py pro_ui.py advanced_features.py operations_ui.py efb_frontend.py
+          python -m pip install "buildozer==1.5.0" "cython==0.29.34"
+
+      - name: Static validation
+        run: |
+          python -m py_compile main.py legacy_main.py aviation_features.py pro_ui.py advanced_features.py operations_ui.py efb_frontend.py local_ai_agent.py faa_knowledge.py
+          python - <<'PY'
+          import ast
+          files = ["main.py","legacy_main.py","aviation_features.py","pro_ui.py","advanced_features.py","operations_ui.py","efb_frontend.py","local_ai_agent.py","faa_knowledge.py"]
+          for path in files:
+              with open(path, encoding="utf-8") as f:
+                  ast.parse(f.read(), filename=path)
+          print("Python syntax OK")
+          PY
+
       - name: Build debug APK
         env:
-          BUILDOZER_WARN_ON_ROOT: '0'
-        run: buildozer -v --debug android clean
-          rm -rf .buildozer/android/platform/build-* || true
+          BUILDOZER_WARN_ON_ROOT: "0"
+        run: |
+          rm -rf .buildozer bin
           buildozer -v --debug android debug
+
       - name: Verify APK
         run: |
-          APK=$(find bin -maxdepth 1 -type f -name '*.apk' | head -n 1)
+          APK="$(find bin -maxdepth 1 -type f -name '*.apk' -print -quit)"
           test -n "$APK"
-          echo "APK=$APK"
           ls -lh "$APK"
+
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
