@@ -2,6 +2,7 @@
 from __future__ import annotations
 import json, math, re, threading, urllib.request, subprocess, os, time, stat
 from pathlib import Path
+try:\n    from faa_knowledge import FAAKnowledge\nexcept Exception:\n    FAAKnowledge=None
 MODEL_REPO="Qwen/Qwen2.5-1.5B-Instruct-GGUF"
 MODEL_FILE="qwen2.5-1.5b-instruct-q4_k_m.gguf"
 MODEL_URL=f"https://huggingface.co/{MODEL_REPO}/resolve/main/{MODEL_FILE}?download=true"
@@ -70,8 +71,16 @@ class LocalModel:
 class OfflineATCAgent:
     def __init__(self,data_dir,provider=None):
         self.data_dir=Path(data_dir);self.model=LocalModel(self.data_dir/"models");self.tools=AviationTools(provider)
+        self.knowledge=FAAKnowledge(self.data_dir) if FAAKnowledge else None
     def status(self):
-        return {"local":True,"model":"Qwen2.5-1.5B-Instruct-Q4_K_M","model_present":self.model.model_present,"runtime_present":self.model.binary_source.exists(),"server_running":bool(self.model.process and self.model.process.poll() is None),"api_key_required":False}
+        return {"local":True,"model":"Qwen2.5-1.5B-Instruct-Q4_K_M","model_present":self.model.model_present,"runtime_present":self.model.binary_source.exists(),"server_running":bool(self.model.process and self.model.process.poll() is None),"faa_knowledge":bool(self.knowledge and list(self.knowledge.root.glob("*.txt"))),"api_key_required":False}
+    def update_faa_knowledge_async(self,done=None):
+        def w():
+            err=None
+            try:self.knowledge.update()
+            except Exception as e:err=str(e)
+            if done:done(err)
+        threading.Thread(target=w,daemon=True).start()
     def download_model_async(self,progress=None,done=None):
         def w():
             err=None
