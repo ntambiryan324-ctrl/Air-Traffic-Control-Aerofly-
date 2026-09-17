@@ -12,7 +12,7 @@ from kivy.clock import Clock
 from kivy.animation import Animation
 from kivy.graphics import Color, RoundedRectangle, Line, Ellipse
 from kivy.metrics import dp
-from kivy.properties import ListProperty, NumericProperty
+from kivy.properties import NumericProperty
 from kivy.uix.behaviors import ButtonBehavior
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.floatlayout import FloatLayout
@@ -22,9 +22,6 @@ from kivy.uix.screenmanager import ScreenManager, Screen, SlideTransition
 from kivy.uix.scrollview import ScrollView
 from kivy.uix.widget import Widget
 
-
-# PocketSky/FlyCharts-inspired visual language, not a copy of their proprietary assets.
-# All advanced modules are intentionally visual-only in this UI pass; functionality comes later.
 PALETTES = {
     "Aviation Blue": ((0.035, 0.050, 0.080, 1), (0.075, 0.105, 0.165, 0.98), (0.13, 0.63, 1.0, 1), (0.16, 0.88, 0.96, 1)),
     "Amber": ((0.055, 0.045, 0.025, 1), (0.115, 0.090, 0.045, 0.98), (1.0, 0.66, 0.12, 1), (1.0, 0.86, 0.35, 1)),
@@ -57,30 +54,9 @@ class Theme:
             cls.muted = (0.57, 0.65, 0.76, 1)
 
 
-class Rounded(Widget):
-    def __init__(self, color=None, radius=22, shadow=True, **kwargs):
-        super().__init__(**kwargs)
-        self.fill = color or Theme.panel
-        self.radius = radius
-        with self.canvas.before:
-            if shadow:
-                Color(0, 0, 0, 0.24)
-                self.shadow = RoundedRectangle(pos=(self.x, self.y - dp(3)), size=self.size, radius=[dp(radius)])
-            Color(*self.fill)
-            self.rect = RoundedRectangle(pos=self.pos, size=self.size, radius=[dp(radius)])
-        self.bind(pos=self._sync, size=self._sync)
-
-    def _sync(self, *_):
-        self.rect.pos, self.rect.size = self.pos, self.size
-        if hasattr(self, "shadow"):
-            self.shadow.pos, self.shadow.size = (self.x, self.y - dp(3)), self.size
-
-
 class Card(BoxLayout):
     def __init__(self, title="", subtitle="", icon="", height=88, **kwargs):
         super().__init__(orientation="vertical", padding=(dp(16), dp(13)), spacing=dp(4), size_hint_y=None, height=dp(height), **kwargs)
-        self.background = Rounded(size_hint=(1, 1), size=self.size)
-        # Background is placed through canvas on the layout itself.
         with self.canvas.before:
             Color(0, 0, 0, 0.22)
             self.shadow = RoundedRectangle(pos=(self.x, self.y - dp(3)), size=self.size, radius=[dp(20)])
@@ -102,8 +78,6 @@ class Card(BoxLayout):
 class NavButton(ButtonBehavior, BoxLayout):
     def __init__(self, label, icon, active=False, **kwargs):
         super().__init__(orientation="vertical", spacing=dp(2), padding=(0, dp(6)), **kwargs)
-        self.label = label
-        self.active = active
         self.add_widget(Label(text=icon, color=Theme.accent if active else Theme.muted, font_size="18sp"))
         self.add_widget(Label(text=label, color=Theme.accent if active else Theme.muted, font_size="8sp", bold=active))
 
@@ -123,7 +97,6 @@ class TopBar(BoxLayout):
 
 
 class Globe(Widget):
-    """Stylized 3D-globe presentation surface. Real terrain/tiles are a later data layer."""
     spin = NumericProperty(0)
 
     def __init__(self, **kwargs):
@@ -155,6 +128,22 @@ class Globe(Widget):
             Line(points=[cx+r*0.1, cy+r*0.15, cx+r*0.35, cy+r*0.27, cx+r*0.52, cy+r*0.18], width=1.8)
 
 
+class SoftButton(ButtonBehavior, Label):
+    def __init__(self, text, color=None, **kwargs):
+        super().__init__(text=text, color=Theme.text, font_size="9sp", bold=True, halign="center", valign="middle", **kwargs)
+        self.fill = color or Theme.panel
+        with self.canvas.before:
+            Color(*self.fill)
+            self.rect = RoundedRectangle(pos=self.pos, size=self.size, radius=[dp(17)])
+        self.bind(pos=lambda *_: setattr(self.rect, "pos", self.pos), size=lambda *_: setattr(self.rect, "size", self.size))
+
+    def on_press(self):
+        Animation(opacity=.65, duration=.08).start(self)
+
+    def on_release(self):
+        Animation(opacity=1, duration=.16).start(self)
+
+
 class MapScreen(Screen):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -162,12 +151,10 @@ class MapScreen(Screen):
         root.add_widget(Globe(size_hint=(1, 1), pos_hint={"center": (0.5, 0.53)}))
         top = TopBar("Navigation", "OPENSTREETMAP • ENROUTE • LIVE MAP", on_settings=lambda *_: App.get_running_app().show("settings"))
         top.pos_hint = {"top": 1}; root.add_widget(top)
-
         chips = BoxLayout(size_hint=(0.94, None), height=dp(42), pos_hint={"center_x": .5, "top": .86}, spacing=dp(7))
         for label in ("OSM", "IFR", "VFR", "WX", "TERRAIN"):
-            b = SoftButton(label); chips.add_widget(b)
+            chips.add_widget(SoftButton(label))
         root.add_widget(chips)
-
         panel = BoxLayout(orientation="vertical", size_hint=(0.92, None), height=dp(104), pos_hint={"center_x": .5, "y": .15}, padding=dp(14), spacing=dp(4))
         with panel.canvas.before:
             Color(*Theme.panel); panel.rect = RoundedRectangle(pos=panel.pos, size=panel.size, radius=[dp(24)])
@@ -186,8 +173,7 @@ class HomeScreen(Screen):
         with root.canvas.before:
             Color(*Theme.bg); self.bg = RoundedRectangle(pos=root.pos, size=root.size)
         root.bind(pos=lambda *_: setattr(self.bg, "pos", root.pos), size=lambda *_: setattr(self.bg, "size", root.size))
-        globe = Globe(size_hint=(1, .63), pos_hint={"top": .92})
-        root.add_widget(globe)
+        root.add_widget(Globe(size_hint=(1, .63), pos_hint={"top": .92}))
         root.add_widget(TopBar("AeroflyATC", "FLIGHT COMPANION • POCKET-SKY STYLE", on_settings=lambda *_: App.get_running_app().show("settings")))
         card = BoxLayout(orientation="vertical", size_hint=(.92, None), height=dp(118), pos_hint={"center_x": .5, "y": .22}, padding=dp(16), spacing=dp(6))
         with card.canvas.before:
@@ -211,7 +197,7 @@ class PlannerScreen(Screen):
         scroll = ScrollView(bar_width=0)
         grid = GridLayout(cols=1, spacing=dp(10), padding=(dp(2), dp(8)), size_hint_y=None)
         grid.bind(minimum_height=grid.setter("height"))
-        cards = [
+        for icon, title, sub in [
             ("✈", "Route Generator", "Origin → destination • optimized route • airway selection"),
             ("↗", "SID / STAR / APPROACH", "Runway-to-runway planning • procedures • ILS"),
             ("◈", "Aircraft Performance", "80+ aircraft concept • cruise level • airspeed • climb/cruise/descent"),
@@ -220,8 +206,7 @@ class PlannerScreen(Screen):
             ("△", "Terrain Clearance", "Vertical profile and terrain-clearance presentation"),
             ("⇧", "Export & Networks", "MSFS • X-Plane • VATSIM • IVAO export/prefill"),
             ("▣", "Flight Logbook", "Planned and completed flights — coming later"),
-        ]
-        for icon, title, sub in cards:
+        ]:
             grid.add_widget(Card(title, sub, icon=icon, height=82))
         scroll.add_widget(grid); root.add_widget(scroll)
         return root
@@ -242,7 +227,8 @@ class ChartsScreen(Screen):
             ("Airspace", "FIR / UIR boundaries and controlled airspace", "◇"),
             ("Airport Search", "Worldwide search • runway-length filtering • operational information", "⌕"),
             ("Closed Airports", "Closed-airport status presentation", "×"),
-        ]: grid.add_widget(Card(title, sub, icon=icon, height=82))
+        ]:
+            grid.add_widget(Card(title, sub, icon=icon, height=82))
         scroll.add_widget(grid); root.add_widget(scroll); self.add_widget(root)
 
 
@@ -261,7 +247,8 @@ class ToolsScreen(Screen):
             ("Flight Plan Import", "SimBrief / route import presentation", "⇩"),
             ("Export to Simulator", "MSFS / X-Plane flight-plan export presentation", "⇧"),
             ("AIRAC Navigation Data", "Cycle-aware waypoints, navaids, procedures and airways", "◌"),
-        ]: grid.add_widget(Card(title, sub, icon=icon, height=82))
+        ]:
+            grid.add_widget(Card(title, sub, icon=icon, height=82))
         scroll.add_widget(grid); root.add_widget(scroll); self.add_widget(root)
 
 
@@ -273,37 +260,21 @@ class SettingsScreen(Screen):
         scroll = ScrollView(bar_width=0)
         box = BoxLayout(orientation="vertical", spacing=dp(10), padding=(dp(2), dp(8)), size_hint_y=None)
         box.bind(minimum_height=box.setter("height"))
-
         theme_card = Card("Appearance", "Switch between dark and light mode", icon="◐", height=98)
         row = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(8))
         for label, dark in (("DARK", True), ("LIGHT", False)):
             b = SoftButton(label); b.bind(on_release=lambda *_x, d=dark: App.get_running_app().set_theme(dark=d)); row.add_widget(b)
         theme_card.add_widget(row); box.add_widget(theme_card)
-
         palette = Card("Colour Palette", "Change the accent system without changing layout", icon="✦", height=122)
         prow = GridLayout(cols=4, spacing=dp(7), size_hint_y=None, height=dp(40))
         for name in PALETTES:
             b = SoftButton(name.split()[0].upper(), color=PALETTES[name][2]); b.bind(on_release=lambda *_x, n=name: App.get_running_app().set_theme(palette=n)); prow.add_widget(b)
         palette.add_widget(prow); box.add_widget(palette)
-
         box.add_widget(Card("Aerofly Connection", "Connect to Aerofly telemetry • TCP/UDP bridge will be wired later", icon="⌁", height=82))
         box.add_widget(Card("Local AI ATC", "Offline model • FAA knowledge • map/terrain/navigation context", icon="AI", height=82))
         box.add_widget(Card("Map Provider", "OpenStreetMap foundation now • other chart providers later", icon="◎", height=82))
         box.add_widget(Card("About", "AeroflyATC • simulation companion • not for real-world operations", icon="ⓘ", height=82))
         scroll.add_widget(box); root.add_widget(scroll); self.add_widget(root)
-
-
-class SoftButton(ButtonBehavior, Label):
-    def __init__(self, text, color=None, **kwargs):
-        super().__init__(text=text, color=Theme.text, font_size="9sp", bold=True, halign="center", valign="middle", **kwargs)
-        self.fill = color or Theme.panel
-        with self.canvas.before:
-            Color(*self.fill)
-            self.rect = RoundedRectangle(pos=self.pos, size=self.size, radius=[dp(17)])
-        self.bind(pos=lambda *_: setattr(self.rect, "pos", self.pos), size=lambda *_: setattr(self.rect, "size", self.size))
-
-    def on_release(self):
-        Animation(scale=1, duration=.12).start(self)
 
 
 class ScratchScreen(Screen):
@@ -319,12 +290,14 @@ class ScratchScreen(Screen):
 class MainNavigation(FloatLayout):
     def __init__(self, manager, **kwargs):
         super().__init__(**kwargs)
-        self.manager = manager
         bar = BoxLayout(size_hint=(.96, None), height=dp(68), pos_hint={"center_x": .5, "y": .015}, spacing=dp(3), padding=(dp(6), dp(5)))
         with bar.canvas.before:
             Color(*Theme.panel); bar.rect = RoundedRectangle(pos=bar.pos, size=bar.size, radius=[dp(26)])
             Color(0, 0, 0, .20); bar.shadow = RoundedRectangle(pos=(bar.x, bar.y-dp(3)), size=bar.size, radius=[dp(26)])
-        bar.bind(pos=lambda *_: (setattr(bar.rect, "pos", bar.pos), setattr(bar.shadow, "pos", (bar.x, bar.y-dp(3)))), size=lambda *_: (setattr(bar.rect, "size", bar.size), setattr(bar.shadow, "size", bar.size)))
+        def sync(*_):
+            bar.rect.pos, bar.rect.size = bar.pos, bar.size
+            bar.shadow.pos, bar.shadow.size = (bar.x, bar.y-dp(3)), bar.size
+        bar.bind(pos=sync, size=sync)
         for name, label, icon in (("home", "Home", "⌂"), ("map", "Map", "◎"), ("planner", "Plan", "✈"), ("charts", "Charts", "▦"), ("tools", "Tools", "◈"), ("scratch", "Scratch", "✎")):
             b = NavButton(label, icon, active=(name == "home"))
             b.bind(on_release=lambda *_x, n=name: manager.show(n))
@@ -338,13 +311,16 @@ class AeroflyATC(App):
     def build(self):
         Theme.apply()
         root = FloatLayout()
+        self.build_into(root)
+        Clock.schedule_once(lambda *_: self._animate(root), .05)
+        return root
+
+    def build_into(self, root):
         self.sm = ScreenManager(transition=SlideTransition(duration=.20))
         for screen in (HomeScreen(name="home"), MapScreen(name="map"), PlannerScreen(name="planner"), ChartsScreen(name="charts"), ToolsScreen(name="tools"), ScratchScreen(name="scratch"), SettingsScreen(name="settings")):
             self.sm.add_widget(screen)
         root.add_widget(self.sm)
-        root.add_widget(MainNavigation(self))
-        Clock.schedule_once(lambda *_: self._animate(root), .05)
-        return root
+        root.add_widget(MainNavigation(self.sm))
 
     def show(self, name):
         if name in self.sm.screen_names:
@@ -352,16 +328,8 @@ class AeroflyATC(App):
 
     def set_theme(self, dark=None, palette=None):
         Theme.apply(palette=palette, dark=dark)
-        # Rebuild once for a consistent palette rather than mutating dozens of canvas objects.
         self.root.clear_widgets()
         self.build_into(self.root)
-
-    def build_into(self, root):
-        self.sm = ScreenManager(transition=SlideTransition(duration=.20))
-        for screen in (HomeScreen(name="home"), MapScreen(name="map"), PlannerScreen(name="planner"), ChartsScreen(name="charts"), ToolsScreen(name="tools"), ScratchScreen(name="scratch"), SettingsScreen(name="settings")):
-            self.sm.add_widget(screen)
-        root.add_widget(self.sm)
-        root.add_widget(MainNavigation(self))
 
     def _animate(self, root):
         root.opacity = 0
