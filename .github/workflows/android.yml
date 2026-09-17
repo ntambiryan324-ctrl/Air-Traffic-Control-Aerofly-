@@ -56,18 +56,45 @@ jobs:
           BUILDOZER_WARN_ON_ROOT: "0"
           PIP_NO_INPUT: "1"
         run: |
-          rm -rf .buildozer bin
+          set -o pipefail
+          rm -rf .buildozer bin build.log
           buildozer -v --debug android debug 2>&1 | tee build.log
+
+      - name: Diagnose generated packages
+        if: always()
+        run: |
+          echo "--- workspace packages ---"
+          find . -type f \( -name '*.apk' -o -name '*.aab' -o -name '*.apks' \) -print -exec ls -lh {} \; || true
+          echo "--- bin directory ---"
+          ls -la bin 2>/dev/null || true
+          echo "--- Buildozer tail ---"
+          tail -n 120 build.log 2>/dev/null || true
 
       - name: Verify APK
         run: |
-          APK="$(find bin -maxdepth 1 -type f -name '*.apk' -print -quit)"
-          test -n "$APK"
+          APK="$(find . -type f -name '*.apk' -print -quit)"
+          if [ -z "$APK" ]; then
+            echo "ERROR: Buildozer exited successfully but produced no APK."
+            echo "The diagnostic output above is part of this run."
+            exit 1
+          fi
+          echo "APK=$APK"
           ls -lh "$APK"
 
       - name: Upload APK
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: aerofly-atc-debug-apk
-          path: bin/*.apk
+          path: '**/*.apk'
           if-no-files-found: error
+
+      - name: Upload build diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aerofly-atc-build-diagnostics
+          path: |
+            build.log
+            .buildozer/android/platform/python-for-android/build.log
+          if-no-files-found: ignore
