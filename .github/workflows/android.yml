@@ -17,10 +17,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Python 3.12.10
+      - name: Python 3.11.9
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12.10"
+          python-version: "3.11.9"
 
       - name: Java 17
         uses: actions/setup-java@v4
@@ -36,7 +36,7 @@ jobs:
       - name: Install current stable Buildozer/p4a toolchain
         run: |
           python -m pip install --upgrade pip
-          python -m pip install "buildozer==1.6.0" "cython==0.29.34" "setuptools<81" wheel virtualenv
+          python -m pip install "buildozer==1.5.0" "cython==0.29.34" "setuptools<81" wheel virtualenv
           buildozer --version
           python -c "import Cython; print('Cython', Cython.__version__)"
 
