@@ -5,7 +5,7 @@ package.domain = org.aeroflycompanion
 source.dir = .
 source.include_exts = py,txt,png,jpg,jpeg,svg,kv
 version = 3.0.2
-requirements = python3==3.12.10,hostpython3==3.12.10,kivy==2.3.1
+requirements = python3==3.11.9,hostpython3==3.11.9,kivy==2.3.1
 orientation = portrait
 fullscreen = 0
 android.api = 34
@@ -16,8 +16,7 @@ android.archs = arm64-v8a
 android.permissions = INTERNET,ACCESS_NETWORK_STATE
 android.accept_sdk_license = True
 android.private_storage = True
-p4a.branch = v2026.05.09
-p4a.local_recipes = p4a-recipes
+p4a.branch = master
 
 [buildozer]
 log_level = 2
