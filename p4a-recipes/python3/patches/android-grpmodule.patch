@@ -1,11 +1,8 @@
-diff --git a/Modules/grpmodule.c b/Modules/grpmodule.c
 --- a/Modules/grpmodule.c
 +++ b/Modules/grpmodule.c
-@@ -5,1 +5,7 @@
- #include <grp.h>
-+
+@@ -5,1 +5,4 @@
+-    if ((d = PyList_New(0)) == NULL)
 +#ifdef __ANDROID__
-+extern void setgrent(void);
-+extern struct group *getgrent(void);
-+extern void endgrent(void);
-+#endif
++    return PyList_New(0);
++#else
++    if ((d = PyList_New(0)) == NULL
