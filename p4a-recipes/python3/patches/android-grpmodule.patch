@@ -1,7 +1,7 @@
 diff --git a/Modules/grpmodule.c b/Modules/grpmodule.c
 --- a/Modules/grpmodule.c
 +++ b/Modules/grpmodule.c
-@@ -123,4 +123,8 @@
+@@ -277,4 +277,8 @@
      PyObject *d;
      struct group *p;
  
