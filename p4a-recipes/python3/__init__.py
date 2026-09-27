@@ -61,7 +61,6 @@ class Python3Recipe(TargetPythonRecipe):
     patches = [
         'patches/pyconfig_detection.patch',
         'patches/reproducible-buildinfo.diff',
-        'patches/android-grpmodule.patch',
     ]
 
     depends = ['hostpython3', 'sqlite3', 'openssl', 'libffi']
@@ -347,6 +346,51 @@ class Python3Recipe(TargetPythonRecipe):
             )
 
         recipe_build_dir = self.get_build_dir(arch.arch)
+
+        # Android/Bionic does not provide the POSIX group enumeration APIs
+        # used by CPython's grp.getgrall(). Disable only that enumeration
+        # path; ordinary grp lookups remain available.
+        grp_source = join(recipe_build_dir, 'Modules', 'grpmodule.c')
+        if isfile(grp_source):
+            with open(grp_source, 'r', encoding='utf-8') as fh:
+                grp_code = fh.read()
+            old = """    if ((d = PyList_New(0)) == NULL)
+        return NULL;
+    setgrent();
+    while ((p = getgrent()) != NULL) {
+        PyObject *v = mkgrent(module, p);
+        if (v == NULL || PyList_Append(d, v) != 0) {
+            Py_XDECREF(v);
+            Py_DECREF(d);
+            endgrent();
+            return NULL;
+        }
+        Py_DECREF(v);
+    }
+    endgrent();
+    return d;"""
+            new = """#ifdef __ANDROID__
+    return PyList_New(0);
+#else
+    if ((d = PyList_New(0)) == NULL)
+        return NULL;
+    setgrent();
+    while ((p = getgrent()) != NULL) {
+        PyObject *v = mkgrent(module, p);
+        if (v == NULL || PyList_Append(d, v) != 0) {
+            Py_XDECREF(v);
+            Py_DECREF(d);
+            endgrent();
+            return NULL;
+        }
+        Py_DECREF(v);
+    }
+    endgrent();
+    return d;
+#endif"""
+            if old in grp_code:
+                with open(grp_source, 'w', encoding='utf-8') as fh:
+                    fh.write(grp_code.replace(old, new, 1))
 
         # Create a subdirectory to actually perform the build
         build_dir = join(recipe_build_dir, 'android-build')
