@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: read
+  actions: write
 
 jobs:
   build:
@@ -79,6 +80,17 @@ jobs:
           fi
           echo "APK=$APK"
           ls -lh "$APK"
+
+      - name: Reclaim Actions artifact quota
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          gh api --paginate "/repos/${GITHUB_REPOSITORY}/actions/artifacts?per_page=100" --jq '.artifacts[] | select(.expired == false) | .id' |
+            while read -r id; do
+              [ -z "$id" ] || gh api --method DELETE "/repos/${GITHUB_REPOSITORY}/actions/artifacts/$id"
+            done
 
       - name: Upload APK
         if: success()
