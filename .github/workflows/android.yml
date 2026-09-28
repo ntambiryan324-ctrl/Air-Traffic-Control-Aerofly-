@@ -95,14 +95,18 @@ jobs:
       - name: Publish APK release
         if: success()
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
+          set -e
           APK="$(find . -type f -name '*.apk' -print -quit)"
-          TAG="build-${GITHUB_RUN_NUMBER}"
-          gh release create "$TAG" "$APK" \
+          TAG="build-${GITHUB_RUN_NUMBER}-${GITHUB_SHA::7}"
+          echo "Publishing $APK as release $TAG"
+          gh release create "$TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --title "Aerofly ATC APK build ${GITHUB_RUN_NUMBER}" \
             --notes "Automated debug APK build from commit ${GITHUB_SHA}."
+          gh release upload "$TAG" "$APK" --repo "$GITHUB_REPOSITORY" --clobber
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY"
 
       # Diagnostics are kept in the job log because the repository's Actions
       # artifact quota is currently exhausted.
