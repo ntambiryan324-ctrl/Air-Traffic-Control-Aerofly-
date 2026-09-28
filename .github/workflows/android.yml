@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
   actions: write
 
 jobs:
@@ -92,13 +92,17 @@ jobs:
               [ -z "$id" ] || gh api --method DELETE "/repos/${GITHUB_REPOSITORY}/actions/artifacts/$id"
             done
 
-      - name: Upload APK
+      - name: Publish APK release
         if: success()
-        uses: actions/upload-artifact@v4
-        with:
-          name: aerofly-atc-debug-apk
-          path: '**/*.apk'
-          if-no-files-found: error
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          APK="$(find . -type f -name '*.apk' -print -quit)"
+          TAG="build-${GITHUB_RUN_NUMBER}"
+          gh release create "$TAG" "$APK" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Aerofly ATC APK build ${GITHUB_RUN_NUMBER}" \
+            --notes "Automated debug APK build from commit ${GITHUB_SHA}."
 
       # Diagnostics are kept in the job log because the repository's Actions
       # artifact quota is currently exhausted.
