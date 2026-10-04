@@ -975,7 +975,12 @@ class AeroflyCompanion:
 
 
 
-from flight_planner import FlightPlanningScreen
+try:
+    from flight_planner import FlightPlanningScreen
+    FLIGHT_PLANNER_IMPORT_ERROR = None
+except Exception as _planner_import_error:
+    FlightPlanningScreen = None
+    FLIGHT_PLANNER_IMPORT_ERROR = repr(_planner_import_error)
 
 class HomeScreen(Screen):
     def __init__(self, app_ref, **kw):
@@ -1009,12 +1014,22 @@ class AeroflyATCApp(App,AeroflyCompanion):
         self.plan={"origin":"","dest":"","route":"","tod_alt":3000,"points":[]}
         self.manager=ScreenManager(transition=SlideTransition(duration=.10))
         self.screens={}
-        for name,cls in (("home",HomeScreen),("flight",MyFlightScreen),("planner",FlightPlanningScreen),("comms",CommsScreen),("scratch",ScratchpadScreen),("settings",SettingsScreen)):
+        screen_defs = [("home", HomeScreen), ("flight", MyFlightScreen), ("comms", CommsScreen), ("scratch", ScratchpadScreen), ("settings", SettingsScreen)]
+        if FlightPlanningScreen is not None:
+            screen_defs.insert(2, ("planner", FlightPlanningScreen))
+        else:
+            self._write_startup_message("Flight planner unavailable: " + str(FLIGHT_PLANNER_IMPORT_ERROR))
+        for name,cls in screen_defs:
             try:
                 s=cls(self,name=name)
             except Exception as e:
                 self._write_crash_log(e);s=Screen(name=name);s.add_widget(Label(text=name.upper()+"\nUNAVAILABLE\n"+repr(e),color=TEXT))
             self.screens[name]=s;self.manager.add_widget(s)
+        if "planner" not in self.screens:
+            fallback=Screen(name="planner")
+            fallback.add_widget(Label(text="FLIGHT PLANNER\nUNAVAILABLE\nCore ATC remains available.",color=TEXT))
+            self.screens["planner"]=fallback
+            self.manager.add_widget(fallback)
         root=BoxLayout(orientation="vertical");root.add_widget(self.manager)
         nav=BoxLayout(size_hint_y=None,height=dp(58),spacing=dp(3),padding=dp(3))
         for name,labeltxt in (("home","HOME"),("flight","MY FLIGHT"),("planner","PLAN"),("comms","ATC"),("scratch","SCRATCH"),("settings","SETTINGS")):
@@ -1029,10 +1044,14 @@ class AeroflyATCApp(App,AeroflyCompanion):
         except Exception as e:self._write_crash_log(e)
     def go(self,name):
         if name in self.manager.screen_names:self.manager.current=name
+    def _write_startup_message(self,msg):
+        try:
+            with open(os.path.join(self.user_data_dir,"startup_error.log"),"a",encoding="utf8") as f:f.write("\n--- startup ---\n"+str(msg)+"\n")
+        except Exception: pass
     def _write_crash_log(self,exc):
         try:
-            with open(os.path.join(self.user_data_dir,"startup_error.log"),"a",encoding="utf8") as f:f.write("\n--- error ---\n"+repr(exc)+"\n")
-        except Exception:pass
+            with open(os.path.join(self.user_data_dir,"startup_error.log"),"a",encoding="utf8") as f:f.write("\n--- error ---\n"+repr(exc)+"\n"+traceback.format_exc()+"\n")
+        except Exception: pass
     def tick(self,_dt):
         try:
             d=self.telemetry.snapshot()
