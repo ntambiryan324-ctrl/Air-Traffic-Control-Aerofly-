@@ -1004,12 +1004,27 @@ class HomeScreen(Screen):
 
 class AeroflyATCApp(App,AeroflyCompanion):
     title="Aerofly Flight Companion"
+    def load_settings(self):
+        """Load persisted app settings before any screen is constructed."""
+        try:
+            with open(self.settings_path, "r", encoding="utf-8") as f:
+                data=json.load(f)
+            if not isinstance(data, dict):
+                data={}
+        except (OSError, ValueError, TypeError):
+            data={}
+        self.gemini_key=str(data.get("gemini_key",""))
+        self.gemini_model=str(data.get("gemini_model","local"))
+        self.openaip_key=str(data.get("openaip_key",""))
+        return data
+
     def build(self):
         self.settings_path=os.path.join(self.user_data_dir,"settings.json")
         self.load_settings()
         self.telemetry=Telemetry()
         self.copilot=Copilot()
-        self.gemini_key="";self.gemini_model="local"
+        self.gemini_key=getattr(self,"gemini_key","")
+        self.gemini_model=getattr(self,"gemini_model","local")
         self.openaip_key=getattr(self,"openaip_key","")
         self.plan={"origin":"","dest":"","route":"","tod_alt":3000,"points":[]}
         self.manager=ScreenManager(transition=SlideTransition(duration=.10))
