@@ -61,6 +61,7 @@ class Python3Recipe(TargetPythonRecipe):
     patches = [
         'patches/pyconfig_detection.patch',
         'patches/reproducible-buildinfo.diff',
+        'patches/android-grpmodule.patch',
     ]
 
     depends = ['hostpython3', 'sqlite3', 'openssl', 'libffi']
