@@ -52,6 +52,36 @@ jobs:
           print('All Python sources compile successfully.')
           PY
 
+      - name: Static startup smoke test
+        run: |
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+
+          source = Path("main.py").read_text(encoding="utf-8")
+          tree = ast.parse(source, filename="main.py")
+          app = next(
+              n for n in tree.body
+              if isinstance(n, ast.ClassDef) and n.name == "AeroflyATCApp"
+          )
+          methods = {n.name for n in app.body if isinstance(n, ast.FunctionDef)}
+          required = {"load_settings", "build", "_start_services", "go", "tick", "on_stop"}
+          missing = sorted(required - methods)
+          if missing:
+              raise SystemExit("Startup smoke test failed; missing AeroflyATCApp methods: " + ", ".join(missing))
+
+          build = next(n for n in app.body if isinstance(n, ast.FunctionDef) and n.name == "build")
+          calls = {
+              n.func.attr for n in ast.walk(build)
+              if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+              and isinstance(n.func.value, ast.Name) and n.func.value.id == "self"
+          }
+          if "load_settings" not in calls:
+              raise SystemExit("Startup smoke test failed; build() no longer loads settings explicitly.")
+
+          print("AeroflyATCApp startup structure is valid.")
+          PY
+
       - name: Build debug APK
         env:
           BUILDOZER_WARN_ON_ROOT: "0"
