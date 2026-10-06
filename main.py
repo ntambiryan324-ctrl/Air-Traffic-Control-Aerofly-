@@ -837,7 +837,7 @@ class SettingsScreen(Screen):
         self.app_ref.openaip_key=self.oai.text.strip();self.app_ref.persist_settings();self.app_ref.map.refresh_data();self.app_ref.go("flight")
 
 
-class AeroflyCompanion:
+class AeroflyCompanion(App):
     @property
     def user_data_dir(self):
         app = App.get_running_app()
