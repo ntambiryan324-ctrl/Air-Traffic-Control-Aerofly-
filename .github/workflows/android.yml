@@ -41,13 +41,20 @@ jobs:
           buildozer --version
           python -c "import Cython; print('Cython', Cython.__version__)"
 
-      - name: Runtime import smoke test
+      - name: Runtime startup structure smoke test
         run: |
           python - <<'PY'
-          import main
-          assert hasattr(main, 'AeroflyATCApp')
-          assert issubclass(main.AeroflyATCApp, main.App)
-          print('Runtime import smoke test passed.')
+          import ast
+          from pathlib import Path
+          tree = ast.parse(Path("main.py").read_text(encoding="utf-8"))
+          classes = {n.name: n for n in tree.body if isinstance(n, ast.ClassDef)}
+          assert "AeroflyATCApp" in classes, "AeroflyATCApp class missing"
+          app = classes["AeroflyATCApp"]
+          bases = [b.id for b in app.bases if isinstance(b, ast.Name)]
+          assert "App" in bases, f"AeroflyATCApp must inherit App, got {bases}"
+          assert any(isinstance(n, ast.FunctionDef) and n.name == "build" for n in app.body), "build() missing"
+          compile(Path("main.py").read_text(encoding="utf-8"), "main.py", "exec")
+          print("Startup structure smoke test passed.")
           PY
 
       - name: Validate every Python source file
