@@ -837,12 +837,6 @@ class SettingsScreen(Screen):
         self.app_ref.openaip_key=self.oai.text.strip();self.app_ref.persist_settings();self.app_ref.map.refresh_data();self.app_ref.go("flight")
 
 
-class AeroflyCompanion(App):
-    @property
-    def user_data_dir(self):
-        app = App.get_running_app()
-        return getattr(app, 'user_data_dir', os.path.join(os.getcwd(), '.aeroflyatc'))
-
     def _write_crash_log(self,exc):
         try:
             with open(os.path.join(self.user_data_dir,"startup_error.log"),"a",encoding="utf8") as f:
@@ -1002,7 +996,7 @@ class HomeScreen(Screen):
             b.bind(on_press=lambda _,n=name:app_ref.go(n));root.add_widget(b)
         root.add_widget(Widget());self.add_widget(root)
 
-class AeroflyATCApp(App,AeroflyCompanion):
+class AeroflyATCApp(AeroflyCompanion):
     title="Aerofly Flight Companion"
     def load_settings(self):
         """Load persisted app settings before any screen is constructed."""
