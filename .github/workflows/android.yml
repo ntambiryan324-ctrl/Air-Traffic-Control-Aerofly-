@@ -41,6 +41,15 @@ jobs:
           buildozer --version
           python -c "import Cython; print('Cython', Cython.__version__)"
 
+      - name: Runtime import smoke test
+        run: |
+          python - <<'PY'
+          import main
+          assert hasattr(main, 'AeroflyATCApp')
+          assert issubclass(main.AeroflyATCApp, main.App)
+          print('Runtime import smoke test passed.')
+          PY
+
       - name: Validate every Python source file
         run: |
           python - <<'PY'
