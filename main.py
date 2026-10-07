@@ -996,7 +996,7 @@ class HomeScreen(Screen):
             b.bind(on_press=lambda _,n=name:app_ref.go(n));root.add_widget(b)
         root.add_widget(Widget());self.add_widget(root)
 
-class AeroflyATCApp(AeroflyCompanion):
+class AeroflyATCApp(App):
     title="Aerofly Flight Companion"
     def load_settings(self):
         """Load persisted app settings before any screen is constructed."""
