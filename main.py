@@ -319,9 +319,11 @@ class TelemetryApp(App):
     def build(self):
         self.telemetry=Telemetry()
         root=BoxLayout(orientation="vertical", spacing=dp(5), padding=dp(6))
-        root.canvas.before.add(Color(*BG))
-        root.canvas.before.add(Rectangle(pos=root.pos,size=root.size))
-        root.bind(pos=lambda w,_:setattr(w.canvas.before.children[0],"rgba",BG))
+        with root.canvas.before:
+            Color(*BG)
+            self.background = Rectangle(pos=root.pos, size=root.size)
+        root.bind(pos=lambda w, *_: setattr(self.background, "pos", w.pos),
+                  size=lambda w, *_: setattr(self.background, "size", w.size))
         head=BoxLayout(size_hint_y=None,height=dp(42),spacing=dp(5))
         head.add_widget(Label(text="AEROFLY TELEMETRY",bold=True,color=TEXT,font_size="17sp",halign="left"))
         self.state=Label(text="WAITING",color=MUTED,size_hint_x=None,width=dp(110),font_size="12sp")
