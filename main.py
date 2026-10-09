@@ -303,31 +303,61 @@ class Telemetry:
     def _tcp_loop(self):
         while self.running:
             s=None
+            requested_host=self.host
+            connected_host=requested_host
             try:
-                host=self.host
-                with self.lock: self.data["message"]=f"Connecting to {host}:{self.TCP_PORT}..."
-                s=socket.create_connection((host,self.TCP_PORT),timeout=4)
+                # On the same Android device, Aerofly may expose the service on loopback
+                # or only on the device's active IPv4 interface. Try both automatically.
+                candidates=[requested_host]
+                if requested_host in ("127.0.0.1", "localhost"):
+                    probe=None
+                    try:
+                        probe=socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                        probe.connect(("8.8.8.8", 80))
+                        local_ip=probe.getsockname()[0]
+                        if local_ip and local_ip not in candidates:
+                            candidates.append(local_ip)
+                    except OSError:
+                        pass
+                    finally:
+                        if probe:
+                            probe.close()
+                last_error=None
+                for candidate in candidates:
+                    with self.lock:
+                        self.data["message"]=f"Connecting to {candidate}:{self.TCP_PORT}..."
+                    try:
+                        s=socket.create_connection((candidate,self.TCP_PORT),timeout=4)
+                        connected_host=candidate
+                        break
+                    except OSError as e:
+                        last_error=e
+                if s is None:
+                    raise last_error or OSError("No simulator address could be reached")
                 s.settimeout(2)
                 self.tcp=s
-                # Aerofly's FSWidgets endpoint expects the client to speak first.
                 s.sendall(b"GET / HTTP/1.1\r\n\r\n")
-                with self.lock: self.data["message"]="TCP socket open; waiting for telemetry (enable Aerofly FSWidgets output)"
+                with self.lock:
+                    self.data["message"]=f"TCP connected at {connected_host}:{self.TCP_PORT}; waiting for telemetry"
                 buf=b""
-                while self.running and host==self.host:
+                while self.running and requested_host==self.host:
                     try:
                         chunk=s.recv(8192)
-                        if not chunk: break
+                        if not chunk:
+                            break
                         buf+=chunk
                         while b"\n" in buf:
                             line,buf=buf.split(b"\n",1)
-                            self._parse(line,"TCP 58585",host)
+                            self._parse(line,"TCP 58585",connected_host)
                     except socket.timeout:
                         if time.time()-self.data["last_packet"]>5:
-                            with self.lock:self.data["connected"]=False
+                            with self.lock:
+                                self.data["connected"]=False
+                                self.data["message"]=f"TCP reachable at {connected_host}:{self.TCP_PORT}, but no telemetry received. Enable Send flight data to FSWidgets Apps in Aerofly."
             except OSError as e:
                 with self.lock:
                     self.data["connected"]=False
-                    self.data["message"]=f"TCP {self.TCP_PORT}: {e}"
+                    self.data["message"]=f"TCP {self.TCP_PORT} failed: {e}. Check Aerofly FSWidgets setting and target IP."
                 time.sleep(2)
             finally:
                 if s:
