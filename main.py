@@ -313,7 +313,7 @@ class Telemetry:
             except OSError:pass
 
 
-class TelemetryApp(App):
+class AeroflyATCApp(App):
     title = "Aerofly Telemetry Map"
 
     def build(self):
@@ -375,4 +375,4 @@ class TelemetryApp(App):
 
 
 if __name__ == "__main__":
-    TelemetryApp().run()
+    AeroflyATCApp().run()
