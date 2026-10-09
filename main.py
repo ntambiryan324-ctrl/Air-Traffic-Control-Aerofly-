@@ -37,8 +37,12 @@ def tile_xy(lat, lon, zoom):
 class MovingMap(Widget):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.lat, self.lon, self.heading = 0.3476, 32.5825, 0.0
-        self.zoom = 11
+        # Start with a global view; zoom to the aircraft when telemetry arrives.
+        self.lat, self.lon, self.heading = 0.0, 0.0, 0.0
+        self.zoom = 2
+        self.has_aircraft_position = False
+        self.tile_errors = 0
+        self.last_tile_error = ""
         self.follow = True
         self.tiles = {}
         self.loading = set()
@@ -49,7 +53,12 @@ class MovingMap(Widget):
         if not (-90 <= lat <= 90 and -180 <= lon <= 180):
             return
         moved = abs(self.lat-lat) > 0.001 or abs(self.lon-lon) > 0.001
+        first_position = not self.has_aircraft_position
+        self.has_aircraft_position = True
         self.lat, self.lon, self.heading = lat, lon, heading
+        if first_position:
+            self.zoom = 10
+            self.follow = True
         if self.follow and moved:
             self.load_tiles()
         self.redraw()
@@ -63,7 +72,7 @@ class MovingMap(Widget):
         self.redraw()
 
     def zoom_by(self, amount):
-        self.zoom = max(3, min(17, self.zoom + amount))
+        self.zoom = max(2, min(17, self.zoom + amount))
         self.load_tiles()
         self.redraw()
 
@@ -87,7 +96,8 @@ class MovingMap(Widget):
                     key = (self.zoom, tx % n, ty)
                     if key not in self.tiles and key not in self.loading:
                         wanted.append(key)
-        for key in wanted[:16]:
+        # Fetch only tiles in the current viewport, in small batches.
+        for key in wanted[:8]:
             self.loading.add(key)
             threading.Thread(target=self._fetch_tile, args=(key,), daemon=True).start()
         self.redraw()
@@ -95,22 +105,48 @@ class MovingMap(Widget):
     def _fetch_tile(self, key):
         z, x, y = key
         try:
-            req = urllib.request.Request(
-                f"https://tile.openstreetmap.org/{z}/{x}/{y}.png",
-                headers={"User-Agent": "AeroflyTelemetryMap/1.0 (Android)"})
-            with urllib.request.urlopen(req, timeout=8) as response:
-                raw = response.read()
-            texture = CoreImage(BytesIO(raw), ext="png").texture
-            Clock.schedule_once(lambda dt, k=key, t=texture: self._tile_ready(k, t), 0)
-        except Exception:
-            Clock.schedule_once(lambda dt, k=key: self.loading.discard(k), 0)
+            # Cache viewed tiles locally for at least seven days.
+            app = App.get_running_app()
+            cache_dir = os.path.join(app.user_data_dir, "osm_tiles", str(z), str(x))
+            os.makedirs(cache_dir, exist_ok=True)
+            cache_file = os.path.join(cache_dir, f"{y}.png")
+            raw = None
+            if os.path.isfile(cache_file) and time.time() - os.path.getmtime(cache_file) < 7 * 86400:
+                with open(cache_file, "rb") as cached:
+                    raw = cached.read()
+            if raw is None:
+                req = urllib.request.Request(
+                    f"https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+                    headers={"User-Agent": "AeroflyTelemetryMap/1.1 (Android; contact: github.com/ntambiryan324-ctrl/Air-Traffic-Control-Aerofly-)"})
+                with urllib.request.urlopen(req, timeout=12) as response:
+                    raw = response.read()
+                temp_file = cache_file + ".tmp"
+                with open(temp_file, "wb") as cached:
+                    cached.write(raw)
+                os.replace(temp_file, cache_file)
+            # Create Kivy/OpenGL textures on the UI thread, not in this worker.
+            Clock.schedule_once(lambda dt, k=key, data=raw: self._tile_ready(k, data), 0)
+        except Exception as exc:
+            Clock.schedule_once(lambda dt, k=key, err=str(exc): self._tile_failed(k, err), 0)
 
-    def _tile_ready(self, key, texture):
+    def _tile_failed(self, key, error):
         self.loading.discard(key)
-        self.tiles[key] = texture
-        if len(self.tiles) > 180:
-            self.tiles = dict(list(self.tiles.items())[-120:])
+        self.tile_errors += 1
+        self.last_tile_error = error
         self.redraw()
+
+    def _tile_ready(self, key, raw):
+        self.loading.discard(key)
+        try:
+            texture = CoreImage(BytesIO(raw), ext="png").texture
+            self.tiles[key] = texture
+            if len(self.tiles) > 220:
+                self.tiles = dict(list(self.tiles.items())[-160:])
+        except Exception as exc:
+            self.tile_errors += 1
+            self.last_tile_error = str(exc)
+        self.redraw()
+        Clock.schedule_once(lambda dt: self.load_tiles(), 0.05)
 
     def redraw(self):
         self.canvas.clear()
@@ -273,8 +309,9 @@ class Telemetry:
                 s=socket.create_connection((host,self.TCP_PORT),timeout=4)
                 s.settimeout(2)
                 self.tcp=s
-                s.sendall(b"GET / HTTP/1.1\r\nHost: aerofly\r\nConnection: keep-alive\r\n\r\n")
-                with self.lock: self.data["message"]="TCP connected; waiting for XGPS/XATT telemetry"
+                # Aerofly's FSWidgets endpoint expects the client to speak first.
+                s.sendall(b"GET / HTTP/1.1\r\n\r\n")
+                with self.lock: self.data["message"]="TCP socket open; waiting for telemetry (enable Aerofly FSWidgets output)"
                 buf=b""
                 while self.running and host==self.host:
                     try:
@@ -335,16 +372,23 @@ class AeroflyATCApp(App):
         conn.add_widget(self.ip)
         b=Button(text="CONNECT / RETRY",size_hint_x=0.38,background_normal="",background_color=BLUE,color=TEXT)
         b.bind(on_press=self.connect);conn.add_widget(b);root.add_widget(conn)
-        self.map=MovingMap(size_hint_y=0.72)
-        root.add_widget(self.map)
+        map_box=BoxLayout(orientation="vertical", spacing=0, size_hint_y=0.72)
+        self.map=MovingMap()
+        map_box.add_widget(self.map)
+        self.map_note=Label(text="Loading global OpenStreetMap… • © OpenStreetMap contributors",
+                            size_hint_y=None, height=dp(20), font_size="10sp", color=MUTED,
+                            halign="right", valign="middle")
+        self.map_note.bind(size=lambda w, *_: setattr(w, "text_size", w.size))
+        map_box.add_widget(self.map_note)
+        root.add_widget(map_box)
         controls=BoxLayout(size_hint_y=None,height=dp(42),spacing=dp(4))
         for label,fn in (("−",lambda *_:self.map.zoom_by(-1)),("+",lambda *_:self.map.zoom_by(1)),
                          ("FOLLOW",lambda *_:self.map.center_plane())):
             b=Button(text=label,background_normal="",background_color=PANEL,color=TEXT)
             b.bind(on_press=fn);controls.add_widget(b)
         root.add_widget(controls)
-        self.status=Label(text="Starting listeners: TCP 58585 • UDP 49002 / 40092",
-                          color=MUTED,size_hint_y=None,height=dp(30),font_size="10sp")
+        self.status=Label(text="Map starting • enable Aerofly Settings > Miscellaneous > Send flight data to FSWidgets Apps",
+                          color=MUTED,size_hint_y=None,height=dp(38),font_size="10sp")
         root.add_widget(self.status)
         self.metrics=Label(text="LAT --  LON --  ALT -- ft  GS -- kt  HDG ---°",
                            color=TEXT,size_hint_y=None,height=dp(28),font_size="11sp")
@@ -363,7 +407,16 @@ class AeroflyATCApp(App):
         d=self.telemetry.snapshot()
         self.state.text="CONNECTED" if d["connected"] else "WAITING"
         self.state.color=GREEN if d["connected"] else MUTED
-        self.status.text=d["message"]+"  |  "+d["transport"]+"  |  packets "+str(d["packets"])
+        tile_info = f"tiles {len(self.map.tiles)}  errors {self.map.tile_errors}"
+        self.status.text=d["message"]+" | "+d["transport"]+" | packets "+str(d["packets"])+" | "+tile_info
+        if self.map.tile_errors and not self.map.tiles:
+            self.map_note.text = "Map tiles failed — check internet access • © OpenStreetMap contributors"
+        elif not self.map.tiles:
+            self.map_note.text = "Loading global OpenStreetMap… • © OpenStreetMap contributors"
+        elif d["lat"] is None:
+            self.map_note.text = "WORLD VIEW — waiting for aircraft telemetry • © OpenStreetMap contributors"
+        else:
+            self.map_note.text = "LIVE AIRCRAFT POSITION • © OpenStreetMap contributors"
         if d["lat"] is not None and d["lon"] is not None:
             self.map.set_position(d["lat"],d["lon"],d["heading"])
             self.metrics.text=f'LAT {d["lat"]:.5f}  LON {d["lon"]:.5f}  ALT {d["alt_ft"]:.0f} ft  GS {d["speed_kt"]:.0f} kt  HDG {d["heading"]:03.0f}°'
