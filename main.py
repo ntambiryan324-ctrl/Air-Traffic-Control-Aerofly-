@@ -36,178 +36,141 @@ def tile_xy(lat, lon, zoom):
 
 
 class MovingMap(Widget):
+    """Offline-rendered aviation globe. No tile server or network map dependency."""
+    AIRPORTS = [
+        ("HKJK", -1.32, 36.93), ("HUEN", 0.04, 32.44), ("HTDA", -6.88, 39.20),
+        ("HAAB", 8.98, 38.80), ("HECA", 30.12, 31.41), ("OERK", 24.96, 46.70),
+        ("OMDB", 25.25, 55.36), ("VABB", 19.09, 72.87), ("VIDP", 28.56, 77.10),
+        ("WSSS", 1.36, 103.99), ("RJTT", 35.55, 139.78), ("ZBAA", 40.08, 116.58),
+        ("EGLL", 51.47, -0.45), ("LFPG", 49.01, 2.55), ("EDDF", 50.03, 8.57),
+        ("EHAM", 52.31, 4.76), ("LEMD", 40.47, -3.56), ("LIRF", 41.80, 12.25),
+        ("KJFK", 40.64, -73.78), ("KLAX", 33.94, -118.41), ("KSFO", 37.62, -122.38),
+        ("CYYZ", 43.68, -79.63), ("SBGR", -23.43, -46.47), ("FAOR", -26.13, 28.24),
+        ("FACT", -33.97, 18.60), ("DNMM", 6.58, 3.32), ("GOBD", 14.74, -17.49),
+        ("LPPT", 38.77, -9.13), ("LOWW", 48.11, 16.57), ("LTFM", 41.28, 28.75),
+        ("UUDD", 55.41, 37.91), ("YSSY", -33.95, 151.18), ("NZAA", -37.01, 174.79),
+    ]
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        # Start with a global view; zoom to the aircraft when telemetry arrives.
-        self.lat, self.lon, self.heading = 0.0, 0.0, 0.0
-        self.zoom = 2
+        self.lat, self.lon, self.heading = 0.0, 20.0, 0.0
         self.has_aircraft_position = False
-        self.tile_errors = 0
-        self.last_tile_error = ""
-        self.tile_queue = []
-        self.tile_worker_running = False
         self.follow = True
-        self.tiles = {}
-        self.loading = set()
+        self.zoom = 1.0
+        self.drag_origin = None
         self.bind(pos=lambda *_: self.redraw(), size=lambda *_: self.redraw())
-        Clock.schedule_once(lambda *_: self.load_tiles(), 0.5)
 
     def set_position(self, lat, lon, heading):
         if not (-90 <= lat <= 90 and -180 <= lon <= 180):
             return
-        moved = abs(self.lat-lat) > 0.001 or abs(self.lon-lon) > 0.001
-        first_position = not self.has_aircraft_position
+        first = not self.has_aircraft_position
         self.has_aircraft_position = True
         self.lat, self.lon, self.heading = lat, lon, heading
-        if first_position:
-            self.zoom = 10
+        if first:
             self.follow = True
-        if self.follow and moved:
-            self.load_tiles()
         self.redraw()
 
     def pan(self, dx, dy):
         self.follow = False
-        scale = 360.0 / (256 * (2 ** self.zoom))
-        self.lon -= dx * scale
-        self.lat += dy * scale * max(0.15, math.cos(math.radians(self.lat)))
-        self.load_tiles()
+        self.lon = ((self.lon - dx * 0.55) + 180) % 360 - 180
+        self.lat = max(-75, min(75, self.lat + dy * 0.35))
         self.redraw()
 
     def zoom_by(self, amount):
-        self.zoom = max(2, min(17, self.zoom + amount))
-        self.load_tiles()
+        self.zoom = max(0.75, min(1.5, self.zoom + amount * 0.12))
         self.redraw()
 
     def center_plane(self):
         self.follow = True
-        self.load_tiles()
         self.redraw()
 
-    def load_tiles(self):
-        if self.width <= 1 or self.height <= 1:
-            return
-        cx, cy = tile_xy(self.lat, self.lon, self.zoom)
-        cols = max(2, int(self.width / 256) + 3)
-        rows = max(2, int(self.height / 256) + 3)
-        ix, iy = int(cx), int(cy)
-        wanted = []
-        for tx in range(ix-cols//2, ix+cols//2+1):
-            for ty in range(iy-rows//2, iy+rows//2+1):
-                n = 2 ** self.zoom
-                if 0 <= ty < n:
-                    key = (self.zoom, tx % n, ty)
-                    if key not in self.tiles and key not in self.loading:
-                        wanted.append(key)
-        # Keep at most two concurrent tile requests to respect OSM's public tile service.
-        for key in wanted:
-            if key not in self.tile_queue:
-                self.tile_queue.append(key)
-        self._start_tile_workers()
-        self.redraw()
-
-    def _start_tile_workers(self):
-        # Two workers maximum; each downloads only tiles currently visible in the viewport.
-        while sum(1 for t in threading.enumerate() if t.name.startswith("osm-tile-")) < 2 and self.tile_queue:
-            key = self.tile_queue.pop(0)
-            if key in self.loading or key in self.tiles:
-                continue
-            self.loading.add(key)
-            threading.Thread(target=self._fetch_tile, args=(key,), daemon=True,
-                             name="osm-tile-worker").start()
-
-    def _fetch_tile(self, key):
-        z, x, y = key
-        try:
-            # Cache viewed tiles locally for at least seven days.
-            app = App.get_running_app()
-            cache_dir = os.path.join(app.user_data_dir, "osm_tiles", str(z), str(x))
-            os.makedirs(cache_dir, exist_ok=True)
-            cache_file = os.path.join(cache_dir, f"{y}.png")
-            raw = None
-            if os.path.isfile(cache_file) and time.time() - os.path.getmtime(cache_file) < 7 * 86400:
-                with open(cache_file, "rb") as cached:
-                    raw = cached.read()
-            if raw is None:
-                req = urllib.request.Request(
-                    f"https://tile.openstreetmap.org/{z}/{x}/{y}.png",
-                    headers={"User-Agent": "AeroflyTelemetryMap/1.1 (Android; contact: github.com/ntambiryan324-ctrl/Air-Traffic-Control-Aerofly-)"})
-                with urllib.request.urlopen(req, timeout=12) as response:
-                    raw = response.read()
-                temp_file = cache_file + ".tmp"
-                with open(temp_file, "wb") as cached:
-                    cached.write(raw)
-                os.replace(temp_file, cache_file)
-            # Create Kivy/OpenGL textures on the UI thread, not in this worker.
-            Clock.schedule_once(lambda dt, k=key, data=raw: self._tile_ready(k, data), 0)
-        except Exception as exc:
-            Clock.schedule_once(lambda dt, k=key, err=str(exc): self._tile_failed(k, err), 0)
-
-    def _tile_failed(self, key, error):
-        self.loading.discard(key)
-        self.tile_errors += 1
-        self.last_tile_error = error
-        self.redraw()
-        self._start_tile_workers()
-
-    def _tile_ready(self, key, raw):
-        self.loading.discard(key)
-        try:
-            texture = CoreImage(BytesIO(raw), ext="png").texture
-            self.tiles[key] = texture
-            if len(self.tiles) > 220:
-                self.tiles = dict(list(self.tiles.items())[-160:])
-        except Exception as exc:
-            self.tile_errors += 1
-            self.last_tile_error = str(exc)
-        self.redraw()
-        self._start_tile_workers()
-        Clock.schedule_once(lambda dt: self.load_tiles(), 0.05)
+    def _project(self, lat, lon, cx, cy, radius):
+        if self.follow and self.has_aircraft_position:
+            center_lat, center_lon = self.lat, self.lon
+        else:
+            center_lat, center_lon = 12.0, 20.0
+        p1, p2 = math.radians(lat), math.radians(center_lat)
+        dl = math.radians((lon - center_lon + 180) % 360 - 180)
+        cosc = math.sin(p2)*math.sin(p1) + math.cos(p2)*math.cos(p1)*math.cos(dl)
+        if cosc < -0.03:
+            return None
+        x = radius * math.cos(p1) * math.sin(dl)
+        y = radius * (math.cos(p2)*math.sin(p1) - math.sin(p2)*math.cos(p1)*math.cos(dl))
+        return cx+x, cy+y
 
     def redraw(self):
         self.canvas.clear()
-        if self.width <= 1 or self.height <= 1:
+        if self.width < 2 or self.height < 2:
             return
         with self.canvas:
-            Color(0.86, 0.88, 0.84, 1)
+            Color(0.018, 0.025, 0.040, 1)
             Rectangle(pos=self.pos, size=self.size)
-            cx, cy = tile_xy(self.lat, self.lon, self.zoom)
-            center_px_x, center_px_y = cx*256, cy*256
-            left = self.x + self.width/2 - center_px_x
-            bottom = self.y + self.height/2 - (256-center_px_y % 256) - (int(cy)*256-center_px_y)
-            n = 2 ** self.zoom
-            cols = int(self.width/256)+3
-            rows = int(self.height/256)+3
-            for tx in range(int(cx)-cols//2, int(cx)+cols//2+1):
-                for ty in range(int(cy)-rows//2, int(cy)+rows//2+1):
-                    if not (0 <= ty < n):
-                        continue
-                    key=(self.zoom, tx % n, ty)
-                    px=self.x+self.width/2 + (tx-cx)*256
-                    py=self.y+self.height/2 - (ty-cy)*256 - 256
-                    texture=self.tiles.get(key)
-                    if texture is not None:
-                        Color(1,1,1,1)
-                        Rectangle(texture=texture, pos=(px,py), size=(256,256))
-                    else:
-                        Color(0.80,0.83,0.79,1)
-                        Rectangle(pos=(px,py),size=(256,256))
-            Color(0.1,0.2,0.2,0.25)
-            Line(rectangle=(self.x,self.y,self.width,self.height),width=1)
-            # Aircraft stays at map centre in follow mode; heading rotates the nose.
-            px, py = self.x+self.width/2, self.y+self.height/2
-            angle=math.radians(self.heading)
-            forward=(math.sin(angle), math.cos(angle))
-            right=(math.cos(angle), -math.sin(angle))
-            tip=(px+forward[0]*dp(18),py+forward[1]*dp(18))
-            tail=(px-forward[0]*dp(12),py-forward[1]*dp(12))
-            leftp=(px+right[0]*dp(8),py+right[1]*dp(8))
-            rightp=(px-right[0]*dp(8),py-right[1]*dp(8))
-            Color(0.02,0.12,0.22,1)
-            Triangle(points=[tip[0],tip[1],leftp[0],leftp[1],tail[0],tail[1]])
-            Triangle(points=[tip[0],tip[1],rightp[0],rightp[1],tail[0],tail[1]])
-            Color(0.1,0.72,1,1)
-            Line(points=[tip[0],tip[1],leftp[0],leftp[1],tail[0],tail[1],rightp[0],rightp[1],tip[0],tip[1]],width=1.4)
+            radius = min(self.width * 0.46, self.height * 0.47) * self.zoom
+            cx, cy = self.center
+            # Sphere body and subtle atmospheric rim.
+            Color(0.16, 0.26, 0.34, 0.32)
+            Ellipse(pos=(cx-radius-dp(4), cy-radius-dp(4)), size=(2*radius+dp(8),2*radius+dp(8)))
+            Color(0.025, 0.055, 0.085, 1)
+            Ellipse(pos=(cx-radius, cy-radius), size=(2*radius,2*radius))
+            # Latitude and longitude graticule.
+            Color(0.30, 0.43, 0.52, 0.42)
+            for factor in (-0.8, -0.55, -0.28, 0.0, 0.28, 0.55, 0.8):
+                yy = cy + radius*factor
+                half = radius*math.sqrt(max(0,1-factor*factor))
+                Line(points=[cx-half,yy,cx+half,yy],width=0.65)
+                xx = cx + radius*factor
+                halfy = radius*math.sqrt(max(0,1-factor*factor))
+                Line(points=[xx,cy-halfy,xx,cy+halfy],width=0.65)
+            projected = {}
+            for code, lat, lon in self.AIRPORTS:
+                point = self._project(lat, lon, cx, cy, radius)
+                if point:
+                    projected[code] = point
+            # Schematic airway network connecting visible airports.
+            routes = [
+                ("HKJK","HUEN"),("HKJK","HAAB"),("HAAB","HECA"),("HECA","OERK"),
+                ("OERK","OMDB"),("OMDB","VABB"),("VABB","VIDP"),("VIDP","WSSS"),
+                ("WSSS","RJTT"),("WSSS","ZBAA"),("EGLL","LFPG"),("EGLL","EDDF"),
+                ("EDDF","EHAM"),("LFPG","LIRF"),("LEMD","LPPT"),("LOWW","LTFM"),
+                ("LTFM","OMDB"),("KJFK","CYYZ"),("KJFK","EGLL"),("KLAX","KSFO"),
+                ("KJFK","KLAX"),("SBGR","DNMM"),("DNMM","GOBD"),("GOBD","LPPT"),
+                ("FAOR","FACT"),("FAOR","HKJK"),("YSSY","NZAA"),("RJTT","YSSY"),
+                ("HUEN","DNMM"),("HAAB","FAOR"),("EDDF","UUDD"),("OMDB","WSSS"),
+            ]
+            Color(0.22, 0.43, 0.70, 0.72)
+            for a,b in routes:
+                if a in projected and b in projected:
+                    Line(points=[*projected[a],*projected[b]],width=0.75)
+            for code, point in projected.items():
+                x,y = point
+                Color(0.15,0.58,0.96,0.95)
+                Ellipse(pos=(x-dp(2),y-dp(2)),size=(dp(4),dp(4)))
+            # Labels are kept sparse and readable at tablet scale.
+            for code in ("HKJK","HUEN","HAAB","HECA","OERK","OMDB","VABB","VIDP",
+                         "EGLL","LFPG","EDDF","EHAM","KJFK","KLAX","RJTT","WSSS",
+                         "FAOR","DNMM","LTFM","YSSY","SBGR","LOWW"):
+                if code in projected:
+                    x,y=projected[code]
+                    Color(0.33,0.66,0.98,1)
+                    # Small ticks are used instead of text inside the canvas; labels below
+                    # are rendered by the app overlay for crisp scalable type.
+                    Line(points=[x-dp(3),y,x+dp(3),y],width=1.2)
+            # Aircraft marker at its geographic location on the globe.
+            if self.has_aircraft_position:
+                plane = self._project(self.lat,self.lon,cx,cy,radius)
+                if plane:
+                    x,y=plane
+                    Color(0.05,0.95,0.66,0.18)
+                    Ellipse(pos=(x-dp(12),y-dp(12)),size=(dp(24),dp(24)))
+                    Color(0.18,1.0,0.70,1)
+                    Ellipse(pos=(x-dp(4),y-dp(4)),size=(dp(8),dp(8)))
+                    Color(0.88,1.0,0.96,1)
+                    Line(points=[x,y,x+math.sin(math.radians(self.heading))*dp(22),
+                                 y+math.cos(math.radians(self.heading))*dp(22)],width=2)
+            # Top and bottom HUD markers.
+            Color(0.15,0.68,1,0.85)
+            Line(points=[cx-dp(8),cy,cx+dp(8),cy],width=0.7)
+            Line(points=[cx,cy-dp(8),cx,cy+dp(8)],width=0.7)
 
     def on_touch_down(self, touch):
         if self.collide_point(*touch.pos):
