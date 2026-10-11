@@ -10,6 +10,7 @@ from io import BytesIO
 from kivy.app import App
 from kivy.clock import Clock
 from kivy.core.image import Image as CoreImage
+from kivy.core.text import Label as CoreLabel
 from kivy.graphics import Color, Line, Ellipse, Triangle, Rectangle
 from kivy.metrics import dp
 from kivy.uix.boxlayout import BoxLayout
@@ -152,9 +153,14 @@ class MovingMap(Widget):
                 if code in projected:
                     x,y=projected[code]
                     Color(0.33,0.66,0.98,1)
-                    # Small ticks are used instead of text inside the canvas; labels below
-                    # are rendered by the app overlay for crisp scalable type.
                     Line(points=[x-dp(3),y,x+dp(3),y],width=1.2)
+                    # Draw crisp scalable airport identifiers over the globe.
+                    glyph = CoreLabel(text=code, font_size=dp(9), color=(0.35,0.68,1,1))
+                    glyph.refresh()
+                    Color(1,1,1,1)
+                    Rectangle(texture=glyph.texture,
+                              pos=(x+dp(4),y+dp(2)),
+                              size=glyph.texture.size)
             # Aircraft marker at its geographic location on the globe.
             if self.has_aircraft_position:
                 plane = self._project(self.lat,self.lon,cx,cy,radius)
