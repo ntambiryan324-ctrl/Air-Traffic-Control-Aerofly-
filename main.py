@@ -379,50 +379,137 @@ class Telemetry:
 class AeroflyATCApp(App):
     title = "Aerofly Telemetry Map"
 
-    def build(self):
-        self.telemetry=Telemetry()
-        root=BoxLayout(orientation="vertical", spacing=dp(5), padding=dp(6))
-        with root.canvas.before:
-            Color(*BG)
-            self.background = Rectangle(pos=root.pos, size=root.size)
-        root.bind(pos=lambda w, *_: setattr(self.background, "pos", w.pos),
-                  size=lambda w, *_: setattr(self.background, "size", w.size))
-        head=BoxLayout(size_hint_y=None,height=dp(42),spacing=dp(5))
-        head.add_widget(Label(text="AEROFLY TELEMETRY",bold=True,color=TEXT,font_size="17sp",halign="left"))
-        self.state=Label(text="WAITING",color=MUTED,size_hint_x=None,width=dp(110),font_size="12sp")
-        head.add_widget(self.state);root.add_widget(head)
-        conn=BoxLayout(size_hint_y=None,height=dp(46),spacing=dp(4))
-        self.ip=TextInput(text="127.0.0.1",hint_text="Aerofly device IPv4",multiline=False,
-                          size_hint_x=0.62,background_color=PANEL,foreground_color=TEXT,
-                          cursor_color=TEXT)
-        conn.add_widget(self.ip)
-        b=Button(text="CONNECT / RETRY",size_hint_x=0.38,background_normal="",background_color=BLUE,color=TEXT)
-        b.bind(on_press=self.connect);conn.add_widget(b);root.add_widget(conn)
-        map_box=BoxLayout(orientation="vertical", spacing=0, size_hint_y=0.72)
-        self.map=MovingMap()
-        map_box.add_widget(self.map)
-        self.map_note=Label(text="Loading global OpenStreetMap… • © OpenStreetMap contributors",
-                            size_hint_y=None, height=dp(20), font_size="10sp", color=MUTED,
-                            halign="right", valign="middle")
-        self.map_note.bind(size=lambda w, *_: setattr(w, "text_size", w.size))
-        map_box.add_widget(self.map_note)
-        root.add_widget(map_box)
-        controls=BoxLayout(size_hint_y=None,height=dp(42),spacing=dp(4))
-        for label,fn in (("−",lambda *_:self.map.zoom_by(-1)),("+",lambda *_:self.map.zoom_by(1)),
-                         ("FOLLOW",lambda *_:self.map.center_plane())):
-            b=Button(text=label,background_normal="",background_color=PANEL,color=TEXT)
-            b.bind(on_press=fn);controls.add_widget(b)
-        root.add_widget(controls)
-        self.status=Label(text="Map starting • enable Aerofly Settings > Miscellaneous > Send flight data to FSWidgets Apps",
-                          color=MUTED,size_hint_y=None,height=dp(38),font_size="10sp")
-        root.add_widget(self.status)
-        self.metrics=Label(text="LAT --  LON --  ALT -- ft  GS -- kt  HDG ---°",
-                           color=TEXT,size_hint_y=None,height=dp(28),font_size="11sp")
-        root.add_widget(self.metrics)
-        Clock.schedule_once(lambda *_:self.telemetry.start(),.3)
-        Clock.schedule_interval(self.refresh,.5)
-        return root
+    def _label(self, text, size="12sp", color=TEXT, bold=False, halign="left"):
+        w = Label(text=text, font_size=size, color=color, bold=bold, halign=halign,
+                  valign="middle", shorten=True, shorten_from="right")
+        w.bind(size=lambda obj, *_: setattr(obj, "text_size", obj.size))
+        return w
 
+    def build(self):
+        self.telemetry = Telemetry()
+        self.screen_mode = "map"
+        self.root_box = BoxLayout(orientation="vertical", spacing=dp(0), padding=dp(0))
+        with self.root_box.canvas.before:
+            Color(*BG)
+            self.background = Rectangle(pos=self.root_box.pos, size=self.root_box.size)
+        self.root_box.bind(pos=lambda w, *_: setattr(self.background, "pos", w.pos),
+                           size=lambda w, *_: setattr(self.background, "size", w.size))
+
+        # Compact glass-style header inspired by the supplied aviation globe reference.
+        head = BoxLayout(size_hint_y=None, height=dp(48), padding=(dp(12),0,dp(10),0), spacing=dp(8))
+        head.add_widget(self._label("AEROFLOW  /  FLIGHT DECK", "15sp", TEXT, True))
+        self.state = self._label("● OFFLINE", "11sp", MUTED, True, "right")
+        self.state.size_hint_x = None
+        self.state.width = dp(112)
+        head.add_widget(self.state)
+        self.root_box.add_widget(head)
+
+        self.content = BoxLayout(orientation="vertical", spacing=dp(0))
+        self.root_box.add_widget(self.content)
+
+        # Globe viewport and floating control rail.
+        self.map_stage = BoxLayout(orientation="vertical", spacing=dp(0))
+        top_info = BoxLayout(size_hint_y=None, height=dp(32), padding=(dp(12),0), spacing=dp(8))
+        top_info.add_widget(self._label("WORLD AIRWAYS", "10sp", BLUE, True))
+        top_info.add_widget(self._label("LIVE NAVIGATION DISPLAY", "9sp", MUTED, False, "right"))
+        self.map_stage.add_widget(top_info)
+
+        self.map = MovingMap()
+        self.map_stage.add_widget(self.map)
+
+        map_note_row = BoxLayout(size_hint_y=None, height=dp(28), padding=(dp(12),0), spacing=dp(6))
+        self.map_note = self._label("GLOBE VIEW  •  waiting for simulator telemetry", "10sp", MUTED)
+        map_note_row.add_widget(self.map_note)
+        self.map_stage.add_widget(map_note_row)
+
+        # Dark bottom flight data strip.
+        self.metrics = self._label("LAT --   LON --   ALT -- ft   GS -- kt   HDG ---°", "11sp", TEXT, True)
+        self.metrics.size_hint_y = None
+        self.metrics.height = dp(36)
+        self.metrics.padding = (dp(12),0)
+        self.map_stage.add_widget(self.metrics)
+
+        self.status = self._label("Aerofly FS Global • Enable Send flight data to FSWidgets Apps", "10sp", MUTED)
+        self.status.size_hint_y = None
+        self.status.height = dp(30)
+        self.status.padding = (dp(12),0)
+        self.map_stage.add_widget(self.status)
+
+        self.flight_plan_screen = BoxLayout(orientation="vertical", padding=(dp(16),dp(12)), spacing=dp(12))
+        self.flight_plan_screen.add_widget(self._label("FLIGHT PLAN", "16sp", TEXT, True))
+        self.flight_plan_screen.add_widget(self._label("Create a route preview for your next flight.", "11sp", MUTED))
+        self.departure = TextInput(hint_text="Departure airport (e.g. HUEN)", multiline=False,
+                                   size_hint_y=None, height=dp(48), background_normal="",
+                                   background_active="", background_color=PANEL, foreground_color=TEXT,
+                                   hint_text_color=MUTED, padding=(dp(12),dp(12)))
+        self.arrival = TextInput(hint_text="Arrival airport (e.g. HKJK)", multiline=False,
+                                 size_hint_y=None, height=dp(48), background_normal="",
+                                 background_active="", background_color=PANEL, foreground_color=TEXT,
+                                 hint_text_color=MUTED, padding=(dp(12),dp(12)))
+        self.aircraft = TextInput(text="Airbus A350-1000 XWB", multiline=False,
+                                  size_hint_y=None, height=dp(48), background_normal="",
+                                  background_active="", background_color=PANEL, foreground_color=TEXT,
+                                  padding=(dp(12),dp(12)))
+        self.plan_result = self._label("Select departure and arrival airports to preview the route.", "11sp", MUTED)
+        self.flight_plan_screen.add_widget(self._label("DEPARTURE", "10sp", MUTED, True))
+        self.flight_plan_screen.add_widget(self.departure)
+        self.flight_plan_screen.add_widget(self._label("ARRIVAL", "10sp", MUTED, True))
+        self.flight_plan_screen.add_widget(self.arrival)
+        self.flight_plan_screen.add_widget(self._label("AIRCRAFT", "10sp", MUTED, True))
+        self.flight_plan_screen.add_widget(self.aircraft)
+        self.flight_plan_screen.add_widget(self.plan_result)
+        generate = Button(text="GENERATE ROUTE PREVIEW", size_hint_y=None, height=dp(48),
+                          background_normal="", background_color=BLUE, color=TEXT, bold=True)
+        generate.bind(on_press=self.generate_plan)
+        self.flight_plan_screen.add_widget(generate)
+        self.flight_plan_screen.add_widget(Widget())
+
+        # Persistent bottom navigation: map / flight plan / connection.
+        nav = BoxLayout(size_hint_y=None, height=dp(58), spacing=dp(1), padding=(dp(6),dp(4)))
+        for label, mode in (("◉  GLOBE", "map"), ("⌁  FLIGHT PLAN", "plan"), ("↔  CONNECTION", "connection")):
+            b = Button(text=label, background_normal="", background_color=PANEL, color=TEXT,
+                       font_size="11sp")
+            b.bind(on_press=lambda _btn, m=mode: self.show_screen(m))
+            nav.add_widget(b)
+        self.root_box.add_widget(nav)
+        self.show_screen("map")
+        Clock.schedule_once(lambda *_: self.telemetry.start(), .4)
+        Clock.schedule_interval(self.refresh, .5)
+        return self.root_box
+
+    def show_screen(self, mode):
+        self.screen_mode = mode
+        self.content.clear_widgets()
+        if mode == "map":
+            self.content.add_widget(self.map_stage)
+        elif mode == "plan":
+            self.content.add_widget(self.flight_plan_screen)
+        else:
+            panel = BoxLayout(orientation="vertical", padding=dp(16), spacing=dp(12))
+            panel.add_widget(self._label("SIMULATOR CONNECTION", "16sp", TEXT, True))
+            panel.add_widget(self._label("Aerofly FS Global → Settings → Miscellaneous → Send flight data to FSWidgets Apps", "12sp", MUTED))
+            self.ip = TextInput(text=self.telemetry.host, hint_text="Simulator device IPv4 address",
+                                multiline=False, size_hint_y=None, height=dp(48),
+                                background_normal="", background_active="", background_color=PANEL,
+                                foreground_color=TEXT, cursor_color=TEXT, padding=(dp(12),dp(12)))
+            panel.add_widget(self._label("SIMULATOR IPv4", "10sp", MUTED, True))
+            panel.add_widget(self.ip)
+            b = Button(text="CONNECT / RETRY", size_hint_y=None, height=dp(48),
+                       background_normal="", background_color=BLUE, color=TEXT, bold=True)
+            b.bind(on_press=self.connect)
+            panel.add_widget(b)
+            self.connection_detail = self._label("TCP 58585 • UDP 49002 / 40092", "11sp", MUTED)
+            panel.add_widget(self.connection_detail)
+            panel.add_widget(Widget())
+            self.content.add_widget(panel)
+
+    def generate_plan(self, *_):
+        dep = self.departure.text.strip().upper()
+        arr = self.arrival.text.strip().upper()
+        if len(dep) < 3 or len(arr) < 3:
+            self.plan_result.text = "Enter valid departure and arrival airport codes."
+            return
+        self.plan_result.text = f"ROUTE PREVIEW   {dep}  →  {arr}\nAircraft: {self.aircraft.text.strip()}\nRoute generation is a preview only; no route has been sent to Aerofly."
     def connect(self,*_):
         self.telemetry.set_host(self.ip.text)
         with self.telemetry.lock:
