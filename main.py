@@ -1,5 +1,6 @@
 import os
 import math
+import re
 import socket
 import threading
 import time
@@ -43,6 +44,8 @@ class MovingMap(Widget):
         self.has_aircraft_position = False
         self.tile_errors = 0
         self.last_tile_error = ""
+        self.tile_queue = []
+        self.tile_worker_running = False
         self.follow = True
         self.tiles = {}
         self.loading = set()
@@ -96,11 +99,22 @@ class MovingMap(Widget):
                     key = (self.zoom, tx % n, ty)
                     if key not in self.tiles and key not in self.loading:
                         wanted.append(key)
-        # Fetch only tiles in the current viewport, in small batches.
-        for key in wanted[:8]:
-            self.loading.add(key)
-            threading.Thread(target=self._fetch_tile, args=(key,), daemon=True).start()
+        # Keep at most two concurrent tile requests to respect OSM's public tile service.
+        for key in wanted:
+            if key not in self.tile_queue:
+                self.tile_queue.append(key)
+        self._start_tile_workers()
         self.redraw()
+
+    def _start_tile_workers(self):
+        # Two workers maximum; each downloads only tiles currently visible in the viewport.
+        while sum(1 for t in threading.enumerate() if t.name.startswith("osm-tile-")) < 2 and self.tile_queue:
+            key = self.tile_queue.pop(0)
+            if key in self.loading or key in self.tiles:
+                continue
+            self.loading.add(key)
+            threading.Thread(target=self._fetch_tile, args=(key,), daemon=True,
+                             name="osm-tile-worker").start()
 
     def _fetch_tile(self, key):
         z, x, y = key
@@ -134,6 +148,7 @@ class MovingMap(Widget):
         self.tile_errors += 1
         self.last_tile_error = error
         self.redraw()
+        self._start_tile_workers()
 
     def _tile_ready(self, key, raw):
         self.loading.discard(key)
@@ -146,6 +161,7 @@ class MovingMap(Widget):
             self.tile_errors += 1
             self.last_tile_error = str(exc)
         self.redraw()
+        self._start_tile_workers()
         Clock.schedule_once(lambda dt: self.load_tiles(), 0.05)
 
     def redraw(self):
@@ -216,8 +232,21 @@ class Telemetry:
     TCP_PORT = 58585
     UDP_PORTS = (49002, 40092)
 
+    @staticmethod
+    def detect_local_ip():
+        probe = None
+        try:
+            probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            probe.connect(("8.8.8.8", 80))
+            return probe.getsockname()[0]
+        except OSError:
+            return ""
+        finally:
+            if probe:
+                probe.close()
+
     def __init__(self):
-        self.host = "127.0.0.1"
+        self.host = self.detect_local_ip() or "127.0.0.1"
         self.running = False
         self.lock = threading.RLock()
         self.tcp = None
@@ -247,7 +276,8 @@ class Telemetry:
 
     def _parse(self, raw, transport, source):
         text = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else raw
-        for line in text.replace("\r", "").split("\n"):
+        # Aerofly/FSWidgets streams may delimit records with CR, LF, or CRLF.
+        for line in re.split(r"[\r\n]+", text):
             line=line.strip()
             try:
                 if line.startswith("XGPS"):
@@ -308,20 +338,13 @@ class Telemetry:
             try:
                 # On the same Android device, Aerofly may expose the service on loopback
                 # or only on the device's active IPv4 interface. Try both automatically.
-                candidates=[requested_host]
-                if requested_host in ("127.0.0.1", "localhost"):
-                    probe=None
-                    try:
-                        probe=socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                        probe.connect(("8.8.8.8", 80))
-                        local_ip=probe.getsockname()[0]
-                        if local_ip and local_ip not in candidates:
-                            candidates.append(local_ip)
-                    except OSError:
-                        pass
-                    finally:
-                        if probe:
-                            probe.close()
+                # The official FSWidgets setup specifies the simulator device's local IP,
+                # not 127.0.0.1. Try the active interface first, loopback second.
+                candidates=[]
+                detected=self.detect_local_ip()
+                for candidate in (requested_host, detected, "127.0.0.1"):
+                    if candidate and candidate not in candidates:
+                        candidates.append(candidate)
                 last_error=None
                 for candidate in candidates:
                     with self.lock:
@@ -346,9 +369,19 @@ class Telemetry:
                         if not chunk:
                             break
                         buf+=chunk
+                        # Accept CR, LF, or CRLF record separators. A CR-only stream
+                        # must not sit forever in the buffer waiting for a newline.
+                        buf=buf.replace(b"\r", b"\n")
                         while b"\n" in buf:
                             line,buf=buf.split(b"\n",1)
                             self._parse(line,"TCP 58585",connected_host)
+                        # Some implementations send one complete XGPS/XATT record without
+                        # a trailing newline. Parse it once enough fields are present.
+                        if buf.startswith((b"XGPS", b"XATT")):
+                            fields=buf.count(b",")
+                            if (buf.startswith(b"XGPS") and fields >= 5) or (buf.startswith(b"XATT") and fields >= 3):
+                                self._parse(buf,"TCP 58585",connected_host)
+                                buf=b""
                     except socket.timeout:
                         if time.time()-self.data["last_packet"]>5:
                             with self.lock:
@@ -440,7 +473,8 @@ class AeroflyATCApp(App):
         tile_info = f"tiles {len(self.map.tiles)}  errors {self.map.tile_errors}"
         self.status.text=d["message"]+" | "+d["transport"]+" | packets "+str(d["packets"])+" | "+tile_info
         if self.map.tile_errors and not self.map.tiles:
-            self.map_note.text = "Map tiles failed — check internet access • © OpenStreetMap contributors"
+            detail = (self.map.last_tile_error or "unknown error").replace("\n", " ")[:95]
+            self.map_note.text = f"OSM tile error: {detail} • © OpenStreetMap contributors"
         elif not self.map.tiles:
             self.map_note.text = "Loading global OpenStreetMap… • © OpenStreetMap contributors"
         elif d["lat"] is None:
