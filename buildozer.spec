@@ -4,7 +4,7 @@ package.name = aeroflyatc
 package.domain = org.aeroflycompanion
 source.dir = .
 source.include_exts = py,txt,png,jpg,jpeg,svg,kv
-version = 3.0.4
+version = 3.1.0
 requirements = python3==3.11.9,hostpython3==3.11.9,kivy==2.3.1,certifi
 orientation = portrait
 fullscreen = 0
