@@ -170,8 +170,8 @@ class MovingMap(StencilView):
         best_zoom = 3
         for candidate in range(18, 2, -1):
             projected = [self._latlon_to_world(lat, lon, candidate) for lat, lon in points]
-            width_px = (max(p[0] for p in projected) - min(p[0] for p in projected)) * self.TILE_SIZE
-            height_px = (max(p[1] for p in projected) - min(p[1] for p in projected)) * self.TILE_SIZE
+            width_px = max(p[0] for p in projected) - min(p[0] for p in projected)
+            height_px = max(p[1] for p in projected) - min(p[1] for p in projected)
             if width_px <= max(1, self.width * 0.72) and height_px <= max(1, self.height * 0.72):
                 best_zoom = candidate
                 break
@@ -879,7 +879,10 @@ class AeroflyATCApp(App):
                             "https://raw.githubusercontent.com/davidmegginson/ourairports-data/main/airports.csv",
                             headers={"User-Agent": "AeroflyATC/3.1 (+https://github.com/ntambiryan324-ctrl/Air-Traffic-Control-Aerofly-)"},
                         )
-                        with urllib.request.urlopen(request, timeout=35) as response:
+                        with urllib.request.urlopen(
+                            request, timeout=35,
+                            context=ssl.create_default_context(cafile=certifi.where()),
+                        ) as response:
                             os.makedirs(os.path.dirname(self.airports_file), exist_ok=True)
                             temp = self.airports_file + ".tmp"
                             with open(temp, "wb") as output:
