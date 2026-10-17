@@ -510,7 +510,7 @@ class Telemetry:
                     self.tcp = s
                     # Aerofly's FSWidgets service expects the client to speak first.
                     # Keep this wake-up request minimal for compatibility with existing clients.
-                    s.sendall(b"GET / HTTP/1.1\\r\\n\\r\\n")
+                    s.sendall(b"GET / HTTP/1.1\r\n\r\n")
                     started = time.time()
                     last_rx = started
                     buf = b""
@@ -527,9 +527,9 @@ class Telemetry:
                             self._record_rx(chunk, "TCP 58585", connected_host)
                             buf += chunk
                             # Tolerate CR, LF, and CRLF delimiters.
-                            buf = buf.replace(b"\\r", b"\\n")
-                            while b"\\n" in buf:
-                                line, buf = buf.split(b"\\n", 1)
+                            buf = buf.replace(b"\r", b"\n")
+                            while b"\n" in buf:
+                                line, buf = buf.split(b"\n", 1)
                                 self._parse(line, "TCP 58585", connected_host)
                             # Some streams omit a final newline.
                             if buf.startswith((b"XGPS", b"XATT")):
@@ -744,7 +744,7 @@ class AeroflyATCApp(App):
             f'RX {d["rx_bytes"]} bytes  •  {d["last_rx_transport"] or "no source"}  •  {preview}'
         )
         if self.map.tile_errors and not self.map.tiles:
-            detail = (self.map.last_tile_error or "network unavailable").replace("\\n", " ")[:90]
+            detail = (self.map.last_tile_error or "network unavailable").replace("\n", " ")[:90]
             self.map_note.text = "MAP ERROR  •  " + detail + "  •  © OpenStreetMap"
         elif not self.map.tiles:
             self.map_note.text = "Loading map tiles…  •  © OpenStreetMap contributors"
