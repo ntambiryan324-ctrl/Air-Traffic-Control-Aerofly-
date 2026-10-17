@@ -1,5 +1,6 @@
 import os
 import math
+import json
 import re
 import socket
 import ssl
@@ -22,6 +23,8 @@ from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.button import Button
 from kivy.uix.label import Label
 from kivy.uix.textinput import TextInput
+from kivy.uix.popup import Popup
+from kivy.uix.scrollview import ScrollView
 from kivy.uix.stencilview import StencilView
 from kivy.uix.widget import Widget
 
@@ -95,6 +98,7 @@ class MovingMap(StencilView):
         self._tile_lock = threading.RLock()
         self._workers = ThreadPoolExecutor(max_workers=4, thread_name_prefix="osm-tile")
         self._drag_last = None
+        self.route_waypoints = []
         self.bind(pos=lambda *_: self.redraw(), size=lambda *_: self.redraw())
 
     @staticmethod
@@ -141,6 +145,10 @@ class MovingMap(StencilView):
         # Avoid clearing and redrawing the full tile canvas for identical telemetry.
         if position_changed or center_changed:
             self.redraw()
+
+    def set_route(self, waypoints):
+        self.route_waypoints = list(waypoints or [])
+        self.redraw()
 
     def center_plane(self):
         self.follow = True
@@ -295,6 +303,29 @@ class MovingMap(StencilView):
                         Color(0.78, 0.81, 0.77, 1)
                         Rectangle(pos=(sx, sy), size=(self.TILE_SIZE, self.TILE_SIZE))
                         self._request_tile(key)
+
+            # Draw planned route and waypoint markers using the map tile projection.
+            route_pixels = []
+            for wp in self.route_waypoints:
+                try:
+                    wx, wy = self._latlon_to_world(float(wp["lat"]), float(wp["lon"]), z)
+                    dx = wx - center_x
+                    if dx > world_size / 2:
+                        dx -= world_size
+                    elif dx < -world_size / 2:
+                        dx += world_size
+                    route_pixels.append((self.center_x + dx, self.center_y + center_y - wy))
+                except (KeyError, TypeError, ValueError):
+                    continue
+            if len(route_pixels) >= 2:
+                Color(0.10, 0.72, 1.0, 0.95)
+                Line(points=[v for p in route_pixels for v in p], width=dp(2.2))
+            for wx, wy in route_pixels:
+                Color(0.02, 0.08, 0.12, 1)
+                Ellipse(pos=(wx-dp(8), wy-dp(8)), size=(dp(16), dp(16)))
+                Color(0.18, 0.78, 1.0, 1)
+                Line(circle=(wx, wy, dp(7)), width=dp(1.5))
+                Ellipse(pos=(wx-dp(2), wy-dp(2)), size=(dp(4), dp(4)))
 
             # Show a stationary test marker before telemetry arrives; switch to green on live data.
             if self.aircraft_lat is None:
@@ -619,6 +650,8 @@ class AeroflyATCApp(App):
 
     def build(self):
         self.telemetry = Telemetry()
+        self.route_file = os.path.join(self.user_data_dir, "route_waypoints.json")
+        self.route_waypoints = self.load_route()
         root = BoxLayout(orientation="vertical", spacing=dp(0), padding=(dp(10), dp(8), dp(10), dp(8)))
         with root.canvas.before:
             Color(*BG)
@@ -662,13 +695,15 @@ class AeroflyATCApp(App):
         root.add_widget(map_head)
 
         self.map = MovingMap(cache_dir=os.path.join(self.user_data_dir, "osm_tiles"))
+        self.map.set_route(self.route_waypoints)
         root.add_widget(self.map)
 
         map_tools = BoxLayout(size_hint_y=None, height=dp(42), padding=(dp(2), dp(4)), spacing=dp(6))
-        map_tools.add_widget(make_button("−", lambda *_: self.map.zoom_by(-1), width=48))
-        map_tools.add_widget(make_button("RECENTER", lambda *_: self.map.center_plane(), BLUE))
-        map_tools.add_widget(make_button("+", lambda *_: self.map.zoom_by(1), width=48))
-        map_tools.add_widget(make_button("RETRY TILES", lambda *_: self.map.retry_tiles(), width=104))
+        map_tools.add_widget(make_button("−", lambda *_: self.map.zoom_by(-1), width=38))
+        map_tools.add_widget(make_button("RECENTER", lambda *_: self.map.center_plane(), BLUE, width=88))
+        map_tools.add_widget(make_button("PLAN ROUTE", self.open_route_planner, width=104))
+        map_tools.add_widget(make_button("+", lambda *_: self.map.zoom_by(1), width=38))
+        map_tools.add_widget(make_button("RETRY", lambda *_: self.map.retry_tiles(), width=66))
         root.add_widget(map_tools)
 
         stats = card(orientation="horizontal", height=72, padding=8, spacing=4)
@@ -723,6 +758,157 @@ class AeroflyATCApp(App):
         Clock.schedule_once(lambda *_: self.telemetry.start(), 0.4)
         Clock.schedule_interval(self.refresh, 0.5)
         return root
+
+    @staticmethod
+    def distance_nm(a, b):
+        radius_nm = 3440.065
+        lat1, lon1 = math.radians(float(a["lat"])), math.radians(float(a["lon"]))
+        lat2, lon2 = math.radians(float(b["lat"])), math.radians(float(b["lon"]))
+        dlat, dlon = lat2-lat1, lon2-lon1
+        h = math.sin(dlat/2)**2 + math.cos(lat1)*math.cos(lat2)*math.sin(dlon/2)**2
+        return 2 * radius_nm * math.asin(min(1.0, math.sqrt(max(0.0, h))))
+
+    def load_route(self):
+        try:
+            with open(self.route_file, "r", encoding="utf-8") as handle:
+                items = json.load(handle)
+            clean = []
+            for item in items if isinstance(items, list) else []:
+                name = str(item.get("name", "WP"))[:24].strip() or "WP"
+                lat, lon = float(item["lat"]), float(item["lon"])
+                if -90 <= lat <= 90 and -180 <= lon <= 180:
+                    clean.append({"name": name, "lat": lat, "lon": lon})
+            return clean[:40]
+        except (OSError, ValueError, TypeError, KeyError):
+            return []
+
+    def save_route(self):
+        try:
+            with open(self.route_file, "w", encoding="utf-8") as handle:
+                json.dump(self.route_waypoints, handle, indent=2)
+        except OSError as exc:
+            if hasattr(self, "route_message"):
+                self.route_message.text = "Could not save route: " + str(exc)[:100]
+
+    def route_distance(self):
+        return sum(self.distance_nm(a, b) for a, b in zip(self.route_waypoints, self.route_waypoints[1:]))
+
+    def open_route_planner(self, *_):
+        body = BoxLayout(orientation="vertical", padding=dp(12), spacing=dp(8))
+        title = self._label("ROUTE PLANNER  /  WAYPOINTS", "14sp", BLUE, True)
+        title.size_hint_y = None
+        title.height = dp(30)
+        body.add_widget(title)
+        body.add_widget(self._label("Enter coordinates in decimal degrees. Route lines and waypoint markers appear on the map.", "10sp", MUTED))
+        name_input = TextInput(hint_text="Waypoint name (e.g. FIX01 or airport)", text="WP",
+                               multiline=False, size_hint_y=None, height=dp(42))
+        lat_input = TextInput(hint_text="Latitude (−90 to 90)", multiline=False,
+                              input_filter="float", size_hint_y=None, height=dp(42))
+        lon_input = TextInput(hint_text="Longitude (−180 to 180)", multiline=False,
+                              input_filter="float", size_hint_y=None, height=dp(42))
+        body.add_widget(name_input)
+        coord_row = BoxLayout(size_hint_y=None, height=dp(42), spacing=dp(6))
+        coord_row.add_widget(lat_input)
+        coord_row.add_widget(lon_input)
+        body.add_widget(coord_row)
+        actions = BoxLayout(size_hint_y=None, height=dp(42), spacing=dp(6))
+        route_popup = Popup(title="Aerofly ATC • Flight planning", content=body,
+                            size_hint=(0.96, 0.88), auto_dismiss=True)
+
+        def refresh_route_view():
+            self.map.set_route(self.route_waypoints)
+            total = self.route_distance()
+            speed = self.telemetry.snapshot().get("speed_kt", 0) or 0
+            ete = (total / speed * 60.0) if speed > 1 else None
+            summary.text = f"{len(self.route_waypoints)} WAYPOINTS  •  {total:.1f} NM" + (
+                f"  •  ETE {int(ete)} min at current GS" if ete is not None else "  •  ETE unavailable until GS > 1 kt"
+            )
+            lines = []
+            for i, wp in enumerate(self.route_waypoints):
+                leg = self.distance_nm(self.route_waypoints[i-1], wp) if i else 0.0
+                lines.append(f"{i+1:02d}  {wp['name']}   {wp['lat']:.5f}, {wp['lon']:.5f}" +
+                             (f"   +{leg:.1f} NM" if i else "   START"))
+            listing.text = "\n".join(lines) if lines else "No waypoints yet. Add the first point above."
+            self.save_route()
+
+        def add_waypoint(*_):
+            try:
+                name = name_input.text.strip()[:24] or f"WP{len(self.route_waypoints)+1:02d}"
+                lat, lon = float(lat_input.text), float(lon_input.text)
+                if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+                    raise ValueError("Coordinates are outside valid latitude/longitude ranges.")
+                if len(self.route_waypoints) >= 40:
+                    raise ValueError("Limit is 40 waypoints per route.")
+                self.route_waypoints.append({"name": name, "lat": lat, "lon": lon})
+                name_input.text, lat_input.text, lon_input.text = f"WP{len(self.route_waypoints)+1:02d}", "", ""
+                refresh_route_view()
+                self.route_message.text = "Waypoint added and saved locally."
+            except ValueError as exc:
+                self.route_message.text = str(exc)
+
+        def add_aircraft_position(*_):
+            d = self.telemetry.snapshot()
+            if d.get("lat") is None or d.get("lon") is None:
+                self.route_message.text = "No live aircraft coordinates yet; enter coordinates manually."
+                return
+            self.route_waypoints.append({"name": f"POS{len(self.route_waypoints)+1:02d}",
+                                         "lat": float(d["lat"]), "lon": float(d["lon"])})
+            refresh_route_view()
+            self.route_message.text = "Current aircraft position added as a waypoint."
+
+        def undo_waypoint(*_):
+            if self.route_waypoints:
+                self.route_waypoints.pop()
+                refresh_route_view()
+                self.route_message.text = "Last waypoint removed."
+
+        def clear_route(*_):
+            self.route_waypoints = []
+            refresh_route_view()
+            self.route_message.text = "Route cleared."
+
+        def export_gpx(*_):
+            try:
+                path = os.path.join(self.user_data_dir, "aerofly_route.gpx")
+                with open(path, "w", encoding="utf-8") as handle:
+                    handle.write('<?xml version="1.0" encoding="UTF-8"?>\n')
+                    handle.write('<gpx version="1.1" creator="Aerofly ATC" xmlns="http://www.topografix.com/GPX/1/1">\n')
+                    for wp in self.route_waypoints:
+                        safe_name = wp["name"].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                        handle.write(f'  <wpt lat="{wp["lat"]:.7f}" lon="{wp["lon"]:.7f}"><name>{safe_name}</name></wpt>\n')
+                    handle.write('</gpx>\n')
+                self.route_message.text = "GPX exported to app storage: " + path
+            except OSError as exc:
+                self.route_message.text = "GPX export failed: " + str(exc)[:100]
+
+        actions.add_widget(make_button("ADD WAYPOINT", add_waypoint, BLUE))
+        actions.add_widget(make_button("ADD LIVE POS", add_aircraft_position))
+        body.add_widget(actions)
+        summary = self._label("", "10sp", GREEN, True)
+        summary.size_hint_y = None
+        summary.height = dp(30)
+        body.add_widget(summary)
+        scroll = ScrollView(size_hint=(1, 1))
+        listing = self._label("", "10sp", TEXT)
+        listing.halign = "left"
+        listing.valign = "top"
+        listing.shorten = False
+        listing.size_hint_y = None
+        listing.bind(width=lambda obj, width: setattr(obj, "text_size", (width, None)),
+                     texture_size=lambda obj, size: setattr(obj, "height", size[1] + dp(16)))
+        scroll.add_widget(listing)
+        body.add_widget(scroll)
+        self.route_message = self._label("Routes are saved on this device. GPX is a portable waypoint format, not an Aerofly mission file.", "9sp", MUTED)
+        self.route_message.size_hint_y = None
+        self.route_message.height = dp(38)
+        body.add_widget(self.route_message)
+        bottom = BoxLayout(size_hint_y=None, height=dp(42), spacing=dp(6))
+        bottom.add_widget(make_button("UNDO LAST", undo_waypoint))
+        bottom.add_widget(make_button("CLEAR ROUTE", clear_route))
+        bottom.add_widget(make_button("EXPORT GPX", export_gpx, BLUE))
+        body.add_widget(bottom)
+        refresh_route_view()
+        route_popup.open()
 
     def connect(self, *_):
         self.telemetry.set_host(self.ip.text)
