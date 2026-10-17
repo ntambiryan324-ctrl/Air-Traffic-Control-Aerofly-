@@ -434,7 +434,7 @@ class Telemetry:
                 line = line[line.find("XATT"):]
             try:
                 if line.startswith("XGPS"):
-                    p=line[4:].strip().split(",")
+                    p=line[4:].lstrip(" ,:\\t").split(",")
                     if len(p)<6: continue
                     with self.lock:
                         self.data.update({"sim":p[0].strip(),"lon":float(p[1]),"lat":float(p[2]),
@@ -443,7 +443,7 @@ class Telemetry:
                             "transport":transport,"message":"Telemetry received from "+source,
                             "last_packet":time.time(),"packets":self.data["packets"]+1})
                 elif line.startswith("XATT"):
-                    p=line[4:].strip().split(",")
+                    p=line[4:].lstrip(" ,:\\t").split(",")
                     if len(p)<4: continue
                     with self.lock:
                         self.data.update({"sim":p[0].strip(),"heading":float(p[1])%360,
