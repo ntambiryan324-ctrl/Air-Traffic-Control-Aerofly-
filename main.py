@@ -966,18 +966,18 @@ class AeroflyATCApp(App):
             try:
                 path = os.path.join(self.user_data_dir, "aerofly_route.gpx")
                 with open(path, "w", encoding="utf-8") as handle:
-                    handle.write('<?xml version="1.0" encoding="UTF-8"?>\\n')
-                    handle.write('<gpx version="1.1" creator="Aerofly ATC" xmlns="http://www.topografix.com/GPX/1/1">\\n')
+                    handle.write('<?xml version="1.0" encoding="UTF-8"?>\n')
+                    handle.write('<gpx version="1.1" creator="Aerofly ATC" xmlns="http://www.topografix.com/GPX/1/1">\n')
                     for wp in self.route_waypoints:
                         safe_name = wp["name"].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-                        handle.write(f'  <wpt lat="{wp["lat"]:.7f}" lon="{wp["lon"]:.7f}"><name>{safe_name}</name></wpt>\\n')
+                        handle.write(f'  <wpt lat="{wp["lat"]:.7f}" lon="{wp["lon"]:.7f}"><name>{safe_name}</name></wpt>\n')
                     if self.route_waypoints:
-                        handle.write('  <rte><name>Aerofly ATC Route</name>\\n')
+                        handle.write('  <rte><name>Aerofly ATC Route</name>\n')
                         for wp in self.route_waypoints:
                             safe_name = wp["name"].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-                            handle.write(f'    <rtept lat="{wp["lat"]:.7f}" lon="{wp["lon"]:.7f}"><name>{safe_name}</name></rtept>\\n')
-                        handle.write('  </rte>\\n')
-                    handle.write('</gpx>\\n')
+                            handle.write(f'    <rtept lat="{wp["lat"]:.7f}" lon="{wp["lon"]:.7f}"><name>{safe_name}</name></rtept>\n')
+                        handle.write('  </rte>\n')
+                    handle.write('</gpx>\n')
                 self.route_message.text = "GPX route exported to app storage: " + path
             except OSError as exc:
                 self.route_message.text = "GPX export failed: " + str(exc)[:100]
