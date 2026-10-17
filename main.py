@@ -424,7 +424,7 @@ class Telemetry:
     def _parse(self, raw, transport, source):
         text = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else raw
         # Strip NUL padding and tolerate a protocol token after a leading prefix.
-        text = text.replace("\\x00", "").replace("\\ufeff", "")
+        text = text.replace(chr(0), "").replace(chr(0xfeff), "")
         # Aerofly/FSWidgets streams may delimit records with CR, LF, or CRLF.
         for line in re.split(r"[\r\n]+", text):
             line=line.strip()
@@ -516,11 +516,11 @@ class Telemetry:
                 # Send a complete HTTP/1.1 request. Some server implementations
                 # expect the Host header before starting the FSWidgets data stream.
                 request = (
-                    f"GET / HTTP/1.1\\r\\n"
-                    f"Host: {connected_host}:{self.TCP_PORT}\\r\\n"
-                    "User-Agent: AeroflyATC/4.0\\r\\n"
-                    "Accept: */*\\r\\n"
-                    "Connection: keep-alive\\r\\n\\r\\n"
+                    f"GET / HTTP/1.1\r\n"
+                    f"Host: {connected_host}:{self.TCP_PORT}\r\n"
+                    "User-Agent: AeroflyATC/4.0\r\n"
+                    "Accept: */*\r\n"
+                    "Connection: keep-alive\r\n\r\n"
                 ).encode("ascii", "replace")
                 s.sendall(request)
                 with self.lock:
