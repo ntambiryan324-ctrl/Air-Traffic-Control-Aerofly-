@@ -2,9 +2,12 @@ import os
 import math
 import re
 import socket
+import ssl
 import threading
 import time
 import urllib.request
+
+import certifi
 from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor
 
@@ -18,6 +21,7 @@ from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.button import Button
 from kivy.uix.label import Label
 from kivy.uix.textinput import TextInput
+from kivy.uix.stencilview import StencilView
 from kivy.uix.widget import Widget
 
 BG = (0.035, 0.055, 0.075, 1)
@@ -37,7 +41,7 @@ def tile_xy(lat, lon, zoom):
     return x, y
 
 
-class MovingMap(Widget):
+class MovingMap(StencilView):
     """OpenStreetMap tile map with cached tiles and a real aircraft overlay."""
     TILE_SIZE = 256
     OSM_TEMPLATE = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
@@ -47,6 +51,9 @@ class MovingMap(Widget):
         app = App.get_running_app()
         self.cache_dir = cache_dir or os.path.join(getattr(app, "user_data_dir", "."), "osm_tiles")
         os.makedirs(self.cache_dir, exist_ok=True)
+        # Use a bundled Mozilla CA store on Android; keep certificate and hostname
+        # verification enabled instead of bypassing TLS checks.
+        self._ssl_context = ssl.create_default_context(cafile=certifi.where())
         self.center_lat = 0.3476
         self.center_lon = 32.5825
         self.zoom = 7
@@ -91,10 +98,23 @@ class MovingMap(Widget):
             return
         if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
             return
-        self.aircraft_lat, self.aircraft_lon, self.heading = lat, lon, heading % 360.0
+        heading = heading % 360.0
+        position_changed = (
+            self.aircraft_lat is None
+            or abs(lat - self.aircraft_lat) > 1e-5
+            or abs(lon - self.aircraft_lon) > 1e-5
+            or abs((heading - self.heading + 180.0) % 360.0 - 180.0) > 0.5
+        )
+        self.aircraft_lat, self.aircraft_lon, self.heading = lat, lon, heading
+        center_changed = False
         if self.follow:
-            self.center_lat, self.center_lon = lat, lon
-        self.redraw()
+            center_changed = (abs(lat - self.center_lat) > 1e-6 or
+                              abs(lon - self.center_lon) > 1e-6)
+            if center_changed:
+                self.center_lat, self.center_lon = lat, lon
+        # Avoid clearing and redrawing the full tile canvas for identical telemetry.
+        if position_changed or center_changed:
+            self.redraw()
 
     def center_plane(self):
         self.follow = True
@@ -148,7 +168,7 @@ class MovingMap(Widget):
                         "Accept": "image/png,image/*;q=0.8,*/*;q=0.5",
                     },
                 )
-                with urllib.request.urlopen(request, timeout=12) as response:
+                with urllib.request.urlopen(request, timeout=12, context=self._ssl_context) as response:
                     if response.status != 200:
                         raise OSError("HTTP " + str(response.status))
                     data = response.read()
@@ -176,6 +196,11 @@ class MovingMap(Widget):
                     self.tiles[key] = texture
                     self._failed_until.pop(key, None)
                 except Exception as exc:
+                    # A truncated/corrupt cache entry would otherwise fail forever.
+                    try:
+                        os.remove(self._tile_path(*key))
+                    except OSError:
+                        pass
                     self.tile_errors += 1
                     self.last_tile_error = "Tile decode: " + str(exc)
                     self._failed_until[key] = time.time() + 30.0
@@ -271,6 +296,12 @@ class MovingMap(Widget):
             self._drag_last = None
             return True
         return super().on_touch_up(touch)
+
+    def retry_tiles(self):
+        """Clear retry backoff after connectivity/certificate settings are corrected."""
+        with self._tile_lock:
+            self._failed_until.clear()
+        self.redraw()
 
     def close(self):
         try:
@@ -501,7 +532,8 @@ class AeroflyATCApp(App):
         map_tools = BoxLayout(size_hint_y=None, height=dp(42), padding=(dp(8),dp(3)), spacing=dp(6))
         for title, action in (("−", lambda *_: self.map.zoom_by(-1)),
                               ("CENTER AIRCRAFT", lambda *_: self.map.center_plane()),
-                              ("+", lambda *_: self.map.zoom_by(1))):
+                              ("+", lambda *_: self.map.zoom_by(1)),
+                              ("RETRY MAP", lambda *_: self.map.retry_tiles())):
             b = Button(text=title, background_normal="", background_color=PANEL,
                        color=TEXT, font_size="12sp")
             b.bind(on_press=action)
