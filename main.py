@@ -6,6 +6,7 @@ import threading
 import time
 import urllib.request
 from io import BytesIO
+from concurrent.futures import ThreadPoolExecutor
 
 from kivy.app import App
 from kivy.clock import Clock
@@ -37,164 +38,245 @@ def tile_xy(lat, lon, zoom):
 
 
 class MovingMap(Widget):
-    """Offline-rendered aviation globe. No tile server or network map dependency."""
-    AIRPORTS = [
-        ("HKJK", -1.32, 36.93), ("HUEN", 0.04, 32.44), ("HTDA", -6.88, 39.20),
-        ("HAAB", 8.98, 38.80), ("HECA", 30.12, 31.41), ("OERK", 24.96, 46.70),
-        ("OMDB", 25.25, 55.36), ("VABB", 19.09, 72.87), ("VIDP", 28.56, 77.10),
-        ("WSSS", 1.36, 103.99), ("RJTT", 35.55, 139.78), ("ZBAA", 40.08, 116.58),
-        ("EGLL", 51.47, -0.45), ("LFPG", 49.01, 2.55), ("EDDF", 50.03, 8.57),
-        ("EHAM", 52.31, 4.76), ("LEMD", 40.47, -3.56), ("LIRF", 41.80, 12.25),
-        ("KJFK", 40.64, -73.78), ("KLAX", 33.94, -118.41), ("KSFO", 37.62, -122.38),
-        ("CYYZ", 43.68, -79.63), ("SBGR", -23.43, -46.47), ("FAOR", -26.13, 28.24),
-        ("FACT", -33.97, 18.60), ("DNMM", 6.58, 3.32), ("GOBD", 14.74, -17.49),
-        ("LPPT", 38.77, -9.13), ("LOWW", 48.11, 16.57), ("LTFM", 41.28, 28.75),
-        ("UUDD", 55.41, 37.91), ("YSSY", -33.95, 151.18), ("NZAA", -37.01, 174.79),
-    ]
+    """OpenStreetMap tile map with cached tiles and a real aircraft overlay."""
+    TILE_SIZE = 256
+    OSM_TEMPLATE = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
 
-    def __init__(self, **kwargs):
+    def __init__(self, cache_dir=None, **kwargs):
         super().__init__(**kwargs)
-        self.lat, self.lon, self.heading = 0.0, 20.0, 0.0
-        self.has_aircraft_position = False
+        app = App.get_running_app()
+        self.cache_dir = cache_dir or os.path.join(getattr(app, "user_data_dir", "."), "osm_tiles")
+        os.makedirs(self.cache_dir, exist_ok=True)
+        self.center_lat = 0.3476
+        self.center_lon = 32.5825
+        self.zoom = 7
         self.follow = True
-        self.zoom = 1.0
-        self.drag_origin = None
+        self.aircraft_lat = None
+        self.aircraft_lon = None
+        self.heading = 0.0
+        self.tiles = {}
+        self.tile_errors = 0
+        self.last_tile_error = ""
+        self._inflight = set()
+        self._failed_until = {}
+        self._tile_lock = threading.RLock()
+        self._workers = ThreadPoolExecutor(max_workers=4, thread_name_prefix="osm-tile")
+        self._drag_last = None
         self.bind(pos=lambda *_: self.redraw(), size=lambda *_: self.redraw())
 
+    @staticmethod
+    def _latlon_to_world(lat, lon, zoom):
+        n = 2 ** zoom
+        lat = max(-85.05112878, min(85.05112878, float(lat)))
+        lon = ((float(lon) + 180.0) % 360.0) - 180.0
+        x = (lon + 180.0) / 360.0 * n * 256.0
+        lat_rad = math.radians(lat)
+        y = (1.0 - math.asinh(math.tan(lat_rad)) / math.pi) / 2.0 * n * 256.0
+        return x, y
+
+    @staticmethod
+    def _world_to_latlon(x, y, zoom):
+        world = (2 ** zoom) * 256.0
+        x %= world
+        y = max(0.0, min(world - 1.0, y))
+        lon = x / world * 360.0 - 180.0
+        n = math.pi - 2.0 * math.pi * y / world
+        lat = math.degrees(math.atan(math.sinh(n)))
+        return lat, lon
+
     def set_position(self, lat, lon, heading):
-        if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+        try:
+            lat, lon, heading = float(lat), float(lon), float(heading)
+        except (TypeError, ValueError):
             return
-        first = not self.has_aircraft_position
-        self.has_aircraft_position = True
-        self.lat, self.lon, self.heading = lat, lon, heading
-        if first:
-            self.follow = True
-        self.redraw()
-
-    def pan(self, dx, dy):
-        self.follow = False
-        self.lon = ((self.lon - dx * 0.55) + 180) % 360 - 180
-        self.lat = max(-75, min(75, self.lat + dy * 0.35))
-        self.redraw()
-
-    def zoom_by(self, amount):
-        self.zoom = max(0.75, min(1.5, self.zoom + amount * 0.12))
+        if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+            return
+        self.aircraft_lat, self.aircraft_lon, self.heading = lat, lon, heading % 360.0
+        if self.follow:
+            self.center_lat, self.center_lon = lat, lon
         self.redraw()
 
     def center_plane(self):
         self.follow = True
+        if self.aircraft_lat is not None:
+            self.center_lat, self.center_lon = self.aircraft_lat, self.aircraft_lon
         self.redraw()
 
-    def _project(self, lat, lon, cx, cy, radius):
-        if self.follow and self.has_aircraft_position:
-            center_lat, center_lon = self.lat, self.lon
-        else:
-            center_lat, center_lon = 12.0, 20.0
-        p1, p2 = math.radians(lat), math.radians(center_lat)
-        dl = math.radians((lon - center_lon + 180) % 360 - 180)
-        cosc = math.sin(p2)*math.sin(p1) + math.cos(p2)*math.cos(p1)*math.cos(dl)
-        if cosc < -0.03:
-            return None
-        x = radius * math.cos(p1) * math.sin(dl)
-        y = radius * (math.cos(p2)*math.sin(p1) - math.sin(p2)*math.cos(p1)*math.cos(dl))
-        return cx+x, cy+y
+    def pan(self, dx, dy):
+        self.follow = False
+        cx, cy = self._latlon_to_world(self.center_lat, self.center_lon, self.zoom)
+        self.center_lat, self.center_lon = self._world_to_latlon(cx - dx, cy + dy, self.zoom)
+        self.redraw()
+
+    def zoom_by(self, amount):
+        new_zoom = max(3, min(18, self.zoom + int(amount)))
+        if new_zoom == self.zoom:
+            return
+        self.zoom = new_zoom
+        if self.follow and self.aircraft_lat is not None:
+            self.center_lat, self.center_lon = self.aircraft_lat, self.aircraft_lon
+        self.redraw()
+
+    def _tile_path(self, z, x, y):
+        return os.path.join(self.cache_dir, str(z), str(x), str(y) + ".png")
+
+    def _request_tile(self, key):
+        z, x, y = key
+        now = time.time()
+        with self._tile_lock:
+            if key in self.tiles or key in self._inflight:
+                return
+            if self._failed_until.get(key, 0) > now:
+                return
+            self._inflight.add(key)
+        self._workers.submit(self._load_tile, key)
+
+    def _load_tile(self, key):
+        z, x, y = key
+        path = self._tile_path(z, x, y)
+        try:
+            data = None
+            if os.path.isfile(path):
+                with open(path, "rb") as handle:
+                    data = handle.read()
+            else:
+                url = self.OSM_TEMPLATE.format(z=z, x=x, y=y)
+                request = urllib.request.Request(
+                    url,
+                    headers={
+                        "User-Agent": "AeroflyATC/3.0 (Android telemetry map; https://github.com/ntambiryan324-ctrl/Air-Traffic-Control-Aerofly-)",
+                        "Accept": "image/png,image/*;q=0.8,*/*;q=0.5",
+                    },
+                )
+                with urllib.request.urlopen(request, timeout=12) as response:
+                    if response.status != 200:
+                        raise OSError("HTTP " + str(response.status))
+                    data = response.read()
+                if not data:
+                    raise OSError("Empty OSM tile response")
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                temp_path = path + ".tmp"
+                with open(temp_path, "wb") as handle:
+                    handle.write(data)
+                os.replace(temp_path, path)
+            Clock.schedule_once(lambda dt, k=key, d=data: self._tile_loaded(k, d, None), 0)
+        except Exception as exc:
+            Clock.schedule_once(lambda dt, k=key, e=str(exc): self._tile_loaded(k, None, e), 0)
+
+    def _tile_loaded(self, key, data, error):
+        with self._tile_lock:
+            self._inflight.discard(key)
+            if error:
+                self.tile_errors += 1
+                self.last_tile_error = error
+                self._failed_until[key] = time.time() + 20.0
+            else:
+                try:
+                    texture = CoreImage(BytesIO(data), ext="png").texture
+                    self.tiles[key] = texture
+                    self._failed_until.pop(key, None)
+                except Exception as exc:
+                    self.tile_errors += 1
+                    self.last_tile_error = "Tile decode: " + str(exc)
+                    self._failed_until[key] = time.time() + 30.0
+        self.redraw()
 
     def redraw(self):
         self.canvas.clear()
         if self.width < 2 or self.height < 2:
             return
+        z = self.zoom
+        world_size = (2 ** z) * self.TILE_SIZE
+        center_x, center_y = self._latlon_to_world(self.center_lat, self.center_lon, z)
+        left_world = center_x - self.width / 2.0
+        right_world = center_x + self.width / 2.0
+        top_world = center_y + self.height / 2.0
+        bottom_world = center_y - self.height / 2.0
+        min_tx = math.floor(left_world / self.TILE_SIZE)
+        max_tx = math.floor(right_world / self.TILE_SIZE)
+        min_ty = math.floor((center_y - self.height / 2.0) / self.TILE_SIZE)
+        max_ty = math.floor((center_y + self.height / 2.0) / self.TILE_SIZE)
+        n = 2 ** z
+
         with self.canvas:
-            Color(0.018, 0.025, 0.040, 1)
+            Color(0.86, 0.88, 0.85, 1)
             Rectangle(pos=self.pos, size=self.size)
-            radius = min(self.width * 0.46, self.height * 0.47) * self.zoom
-            cx, cy = self.center
-            # Sphere body and subtle atmospheric rim.
-            Color(0.16, 0.26, 0.34, 0.32)
-            Ellipse(pos=(cx-radius-dp(4), cy-radius-dp(4)), size=(2*radius+dp(8),2*radius+dp(8)))
-            Color(0.025, 0.055, 0.085, 1)
-            Ellipse(pos=(cx-radius, cy-radius), size=(2*radius,2*radius))
-            # Latitude and longitude graticule.
-            Color(0.30, 0.43, 0.52, 0.42)
-            for factor in (-0.8, -0.55, -0.28, 0.0, 0.28, 0.55, 0.8):
-                yy = cy + radius*factor
-                half = radius*math.sqrt(max(0,1-factor*factor))
-                Line(points=[cx-half,yy,cx+half,yy],width=0.65)
-                xx = cx + radius*factor
-                halfy = radius*math.sqrt(max(0,1-factor*factor))
-                Line(points=[xx,cy-halfy,xx,cy+halfy],width=0.65)
-            projected = {}
-            for code, lat, lon in self.AIRPORTS:
-                point = self._project(lat, lon, cx, cy, radius)
-                if point:
-                    projected[code] = point
-            # Schematic airway network connecting visible airports.
-            routes = [
-                ("HKJK","HUEN"),("HKJK","HAAB"),("HAAB","HECA"),("HECA","OERK"),
-                ("OERK","OMDB"),("OMDB","VABB"),("VABB","VIDP"),("VIDP","WSSS"),
-                ("WSSS","RJTT"),("WSSS","ZBAA"),("EGLL","LFPG"),("EGLL","EDDF"),
-                ("EDDF","EHAM"),("LFPG","LIRF"),("LEMD","LPPT"),("LOWW","LTFM"),
-                ("LTFM","OMDB"),("KJFK","CYYZ"),("KJFK","EGLL"),("KLAX","KSFO"),
-                ("KJFK","KLAX"),("SBGR","DNMM"),("DNMM","GOBD"),("GOBD","LPPT"),
-                ("FAOR","FACT"),("FAOR","HKJK"),("YSSY","NZAA"),("RJTT","YSSY"),
-                ("HUEN","DNMM"),("HAAB","FAOR"),("EDDF","UUDD"),("OMDB","WSSS"),
-            ]
-            Color(0.22, 0.43, 0.70, 0.72)
-            for a,b in routes:
-                if a in projected and b in projected:
-                    Line(points=[*projected[a],*projected[b]],width=0.75)
-            for code, point in projected.items():
-                x,y = point
-                Color(0.15,0.58,0.96,0.95)
-                Ellipse(pos=(x-dp(2),y-dp(2)),size=(dp(4),dp(4)))
-            # Labels are kept sparse and readable at tablet scale.
-            for code in ("HKJK","HUEN","HAAB","HECA","OERK","OMDB","VABB","VIDP",
-                         "EGLL","LFPG","EDDF","EHAM","KJFK","KLAX","RJTT","WSSS",
-                         "FAOR","DNMM","LTFM","YSSY","SBGR","LOWW"):
-                if code in projected:
-                    x,y=projected[code]
-                    Color(0.33,0.66,0.98,1)
-                    Line(points=[x-dp(3),y,x+dp(3),y],width=1.2)
-                    # Draw crisp scalable airport identifiers over the globe.
-                    glyph = CoreLabel(text=code, font_size=dp(9), color=(0.35,0.68,1,1))
-                    glyph.refresh()
-                    Color(1,1,1,1)
-                    Rectangle(texture=glyph.texture,
-                              pos=(x+dp(4),y+dp(2)),
-                              size=glyph.texture.size)
-            # Aircraft marker at its geographic location on the globe.
-            if self.has_aircraft_position:
-                plane = self._project(self.lat,self.lon,cx,cy,radius)
-                if plane:
-                    x,y=plane
-                    Color(0.05,0.95,0.66,0.18)
-                    Ellipse(pos=(x-dp(12),y-dp(12)),size=(dp(24),dp(24)))
-                    Color(0.18,1.0,0.70,1)
-                    Ellipse(pos=(x-dp(4),y-dp(4)),size=(dp(8),dp(8)))
-                    Color(0.88,1.0,0.96,1)
-                    Line(points=[x,y,x+math.sin(math.radians(self.heading))*dp(22),
-                                 y+math.cos(math.radians(self.heading))*dp(22)],width=2)
-            # Top and bottom HUD markers.
-            Color(0.15,0.68,1,0.85)
-            Line(points=[cx-dp(8),cy,cx+dp(8),cy],width=0.7)
-            Line(points=[cx,cy-dp(8),cx,cy+dp(8)],width=0.7)
+            for ty in range(min_ty, max_ty + 1):
+                if ty < 0 or ty >= n:
+                    continue
+                for tx in range(min_tx, max_tx + 1):
+                    tile_x = tx % n
+                    key = (z, tile_x, ty)
+                    sx = self.center_x + tx * self.TILE_SIZE - center_x
+                    sy = self.center_y + center_y - (ty + 1) * self.TILE_SIZE
+                    with self._tile_lock:
+                        texture = self.tiles.get(key)
+                    if texture is not None:
+                        Color(1, 1, 1, 1)
+                        Rectangle(texture=texture, pos=(sx, sy),
+                                  size=(self.TILE_SIZE, self.TILE_SIZE))
+                    else:
+                        Color(0.78, 0.81, 0.77, 1)
+                        Rectangle(pos=(sx, sy), size=(self.TILE_SIZE, self.TILE_SIZE))
+                        self._request_tile(key)
+
+            # Show a stationary test marker before telemetry arrives; switch to green on live data.
+            if self.aircraft_lat is None:
+                px, py = self.center_x, self.center_y
+                Color(1.0, 0.65, 0.05, 0.22)
+                Ellipse(pos=(px-dp(14), py-dp(14)), size=(dp(28), dp(28)))
+                Color(0.95, 0.55, 0.05, 1)
+            else:
+                aircraft_x, aircraft_y = self._latlon_to_world(self.aircraft_lat, self.aircraft_lon, z)
+                delta_x = aircraft_x - center_x
+                if delta_x > world_size / 2:
+                    delta_x -= world_size
+                elif delta_x < -world_size / 2:
+                    delta_x += world_size
+                px = self.center_x + delta_x
+                py = self.center_y + center_y - aircraft_y
+                Color(0.08, 0.95, 0.58, 0.22)
+                Ellipse(pos=(px-dp(15), py-dp(15)), size=(dp(30), dp(30)))
+                Color(0.05, 0.82, 0.42, 1)
+
+            # Nose points along the current heading; its position is tied to geographic coordinates.
+            angle = math.radians(self.heading)
+            fx, fy = math.sin(angle), math.cos(angle)
+            side_x, side_y = fy, -fx
+            p1 = (px + fx*dp(13), py + fy*dp(13))
+            p2 = (px - fx*dp(8) + side_x*dp(7), py - fy*dp(8) + side_y*dp(7))
+            p3 = (px - fx*dp(8) - side_x*dp(7), py - fy*dp(8) - side_y*dp(7))
+            Triangle(points=[p1[0],p1[1],p2[0],p2[1],p3[0],p3[1]])
+            Color(0.06, 0.10, 0.13, 1)
+            Line(points=[p1[0],p1[1],p2[0],p2[1],p3[0],p3[1],p1[0],p1[1]], width=1)
 
     def on_touch_down(self, touch):
         if self.collide_point(*touch.pos):
             self._drag_last = touch.pos
+            touch.grab(self)
             return True
         return super().on_touch_down(touch)
 
     def on_touch_move(self, touch):
-        if getattr(self, "_drag_last", None) and self.collide_point(*touch.pos):
-            oldx, oldy = self._drag_last
-            self.pan(touch.x-oldx, touch.y-oldy)
+        if touch.grab_current is self and self._drag_last is not None:
+            old_x, old_y = self._drag_last
+            self.pan(touch.x-old_x, touch.y-old_y)
             self._drag_last = touch.pos
             return True
         return super().on_touch_move(touch)
 
     def on_touch_up(self, touch):
-        self._drag_last = None
+        if touch.grab_current is self:
+            touch.ungrab(self)
+            self._drag_last = None
+            return True
         return super().on_touch_up(touch)
+
+    def close(self):
+        try:
+            self._workers.shutdown(wait=False, cancel_futures=True)
+        except TypeError:
+            self._workers.shutdown(wait=False)
 
 
 class Telemetry:
@@ -386,165 +468,120 @@ class AeroflyATCApp(App):
     title = "Aerofly Telemetry Map"
 
     def _label(self, text, size="12sp", color=TEXT, bold=False, halign="left"):
-        w = Label(text=text, font_size=size, color=color, bold=bold, halign=halign,
-                  valign="middle", shorten=True, shorten_from="right")
+        w = Label(text=text, font_size=size, color=color, bold=bold,
+                  halign=halign, valign="middle", shorten=True, shorten_from="right")
         w.bind(size=lambda obj, *_: setattr(obj, "text_size", obj.size))
         return w
 
     def build(self):
         self.telemetry = Telemetry()
-        self.screen_mode = "map"
-        self.root_box = BoxLayout(orientation="vertical", spacing=dp(0), padding=dp(0))
-        with self.root_box.canvas.before:
+        root = BoxLayout(orientation="vertical", spacing=dp(0), padding=dp(0))
+        with root.canvas.before:
             Color(*BG)
-            self.background = Rectangle(pos=self.root_box.pos, size=self.root_box.size)
-        self.root_box.bind(pos=lambda w, *_: setattr(self.background, "pos", w.pos),
-                           size=lambda w, *_: setattr(self.background, "size", w.size))
+            self._bg_rect = Rectangle(pos=root.pos, size=root.size)
+        root.bind(pos=lambda w, *_: setattr(self._bg_rect, "pos", w.pos),
+                  size=lambda w, *_: setattr(self._bg_rect, "size", w.size))
 
-        # Compact glass-style header inspired by the supplied aviation globe reference.
-        head = BoxLayout(size_hint_y=None, height=dp(48), padding=(dp(12),0,dp(10),0), spacing=dp(8))
-        head.add_widget(self._label("AEROFLOW  /  FLIGHT DECK", "15sp", TEXT, True))
-        self.state = self._label("● OFFLINE", "11sp", MUTED, True, "right")
+        header = BoxLayout(size_hint_y=None, height=dp(44), padding=(dp(12),0,dp(10),0), spacing=dp(8))
+        header.add_widget(self._label("AEROFLY  /  TELEMETRY TEST", "14sp", TEXT, True))
+        self.state = self._label("WAITING", "11sp", MUTED, True, "right")
         self.state.size_hint_x = None
-        self.state.width = dp(112)
-        head.add_widget(self.state)
-        self.root_box.add_widget(head)
+        self.state.width = dp(94)
+        header.add_widget(self.state)
+        root.add_widget(header)
 
-        self.content = BoxLayout(orientation="vertical", spacing=dp(0))
-        self.root_box.add_widget(self.content)
+        map_head = BoxLayout(size_hint_y=None, height=dp(28), padding=(dp(12),0), spacing=dp(6))
+        map_head.add_widget(self._label("OPENSTREETMAP", "10sp", BLUE, True))
+        map_head.add_widget(self._label("DRAG TO PAN  •  +/- TO ZOOM", "9sp", MUTED, False, "right"))
+        root.add_widget(map_head)
 
-        # Globe viewport and floating control rail.
-        self.map_stage = BoxLayout(orientation="vertical", spacing=dp(0))
-        top_info = BoxLayout(size_hint_y=None, height=dp(32), padding=(dp(12),0), spacing=dp(8))
-        top_info.add_widget(self._label("WORLD AIRWAYS", "10sp", BLUE, True))
-        top_info.add_widget(self._label("LIVE NAVIGATION DISPLAY", "9sp", MUTED, False, "right"))
-        self.map_stage.add_widget(top_info)
+        self.map = MovingMap(cache_dir=os.path.join(self.user_data_dir, "osm_tiles"))
+        root.add_widget(self.map)
 
-        self.map = MovingMap()
-        self.map_stage.add_widget(self.map)
+        map_tools = BoxLayout(size_hint_y=None, height=dp(42), padding=(dp(8),dp(3)), spacing=dp(6))
+        for title, action in (("−", lambda *_: self.map.zoom_by(-1)),
+                              ("CENTER AIRCRAFT", lambda *_: self.map.center_plane()),
+                              ("+", lambda *_: self.map.zoom_by(1))):
+            b = Button(text=title, background_normal="", background_color=PANEL,
+                       color=TEXT, font_size="12sp")
+            b.bind(on_press=action)
+            map_tools.add_widget(b)
+        root.add_widget(map_tools)
 
-        map_note_row = BoxLayout(size_hint_y=None, height=dp(28), padding=(dp(12),0), spacing=dp(6))
-        self.map_note = self._label("GLOBE VIEW  •  waiting for simulator telemetry", "10sp", MUTED)
-        map_note_row.add_widget(self.map_note)
-        self.map_stage.add_widget(map_note_row)
-
-        # Dark bottom flight data strip.
         self.metrics = self._label("LAT --   LON --   ALT -- ft   GS -- kt   HDG ---°", "11sp", TEXT, True)
         self.metrics.size_hint_y = None
-        self.metrics.height = dp(36)
+        self.metrics.height = dp(32)
         self.metrics.padding = (dp(12),0)
-        self.map_stage.add_widget(self.metrics)
+        root.add_widget(self.metrics)
 
-        self.status = self._label("Aerofly FS Global • Enable Send flight data to FSWidgets Apps", "10sp", MUTED)
+        connection = BoxLayout(size_hint_y=None, height=dp(48), padding=(dp(8),dp(4)), spacing=dp(6))
+        self.ip = TextInput(text=self.telemetry.host, hint_text="Simulator device IPv4 address",
+                            multiline=False, size_hint_x=0.68,
+                            background_normal="", background_active="",
+                            background_color=PANEL, foreground_color=TEXT,
+                            cursor_color=TEXT, hint_text_color=MUTED,
+                            padding=(dp(10),dp(10)))
+        connect = Button(text="CONNECT", size_hint_x=0.32, background_normal="",
+                         background_color=BLUE, color=TEXT, bold=True)
+        connect.bind(on_press=self.connect)
+        connection.add_widget(self.ip)
+        connection.add_widget(connect)
+        root.add_widget(connection)
+
+        self.map_note = self._label("Loading OpenStreetMap tiles… • © OpenStreetMap contributors", "9sp", MUTED)
+        self.map_note.size_hint_y = None
+        self.map_note.height = dp(22)
+        self.map_note.padding = (dp(12),0)
+        root.add_widget(self.map_note)
+
+        self.status = self._label("TCP 58585  •  UDP 49002 / 40092  •  Enable FSWidgets data in Aerofly", "10sp", MUTED)
         self.status.size_hint_y = None
-        self.status.height = dp(30)
+        self.status.height = dp(36)
         self.status.padding = (dp(12),0)
-        self.map_stage.add_widget(self.status)
+        root.add_widget(self.status)
 
-        self.flight_plan_screen = BoxLayout(orientation="vertical", padding=(dp(16),dp(12)), spacing=dp(12))
-        self.flight_plan_screen.add_widget(self._label("FLIGHT PLAN", "16sp", TEXT, True))
-        self.flight_plan_screen.add_widget(self._label("Create a route preview for your next flight.", "11sp", MUTED))
-        self.departure = TextInput(hint_text="Departure airport (e.g. HUEN)", multiline=False,
-                                   size_hint_y=None, height=dp(48), background_normal="",
-                                   background_active="", background_color=PANEL, foreground_color=TEXT,
-                                   hint_text_color=MUTED, padding=(dp(12),dp(12)))
-        self.arrival = TextInput(hint_text="Arrival airport (e.g. HKJK)", multiline=False,
-                                 size_hint_y=None, height=dp(48), background_normal="",
-                                 background_active="", background_color=PANEL, foreground_color=TEXT,
-                                 hint_text_color=MUTED, padding=(dp(12),dp(12)))
-        self.aircraft = TextInput(text="Airbus A350-1000 XWB", multiline=False,
-                                  size_hint_y=None, height=dp(48), background_normal="",
-                                  background_active="", background_color=PANEL, foreground_color=TEXT,
-                                  padding=(dp(12),dp(12)))
-        self.plan_result = self._label("Select departure and arrival airports to preview the route.", "11sp", MUTED)
-        self.flight_plan_screen.add_widget(self._label("DEPARTURE", "10sp", MUTED, True))
-        self.flight_plan_screen.add_widget(self.departure)
-        self.flight_plan_screen.add_widget(self._label("ARRIVAL", "10sp", MUTED, True))
-        self.flight_plan_screen.add_widget(self.arrival)
-        self.flight_plan_screen.add_widget(self._label("AIRCRAFT", "10sp", MUTED, True))
-        self.flight_plan_screen.add_widget(self.aircraft)
-        self.flight_plan_screen.add_widget(self.plan_result)
-        generate = Button(text="GENERATE ROUTE PREVIEW", size_hint_y=None, height=dp(48),
-                          background_normal="", background_color=BLUE, color=TEXT, bold=True)
-        generate.bind(on_press=self.generate_plan)
-        self.flight_plan_screen.add_widget(generate)
-        self.flight_plan_screen.add_widget(Widget())
+        Clock.schedule_once(lambda *_: self.telemetry.start(), 0.4)
+        Clock.schedule_interval(self.refresh, 0.5)
+        return root
 
-        # Persistent bottom navigation: map / flight plan / connection.
-        nav = BoxLayout(size_hint_y=None, height=dp(58), spacing=dp(1), padding=(dp(6),dp(4)))
-        for label, mode in (("◉  GLOBE", "map"), ("⌁  FLIGHT PLAN", "plan"), ("↔  CONNECTION", "connection")):
-            b = Button(text=label, background_normal="", background_color=PANEL, color=TEXT,
-                       font_size="11sp")
-            b.bind(on_press=lambda _btn, m=mode: self.show_screen(m))
-            nav.add_widget(b)
-        self.root_box.add_widget(nav)
-        self.show_screen("map")
-        Clock.schedule_once(lambda *_: self.telemetry.start(), .4)
-        Clock.schedule_interval(self.refresh, .5)
-        return self.root_box
-
-    def show_screen(self, mode):
-        self.screen_mode = mode
-        self.content.clear_widgets()
-        if mode == "map":
-            self.content.add_widget(self.map_stage)
-        elif mode == "plan":
-            self.content.add_widget(self.flight_plan_screen)
-        else:
-            panel = BoxLayout(orientation="vertical", padding=dp(16), spacing=dp(12))
-            panel.add_widget(self._label("SIMULATOR CONNECTION", "16sp", TEXT, True))
-            panel.add_widget(self._label("Aerofly FS Global → Settings → Miscellaneous → Send flight data to FSWidgets Apps", "12sp", MUTED))
-            self.ip = TextInput(text=self.telemetry.host, hint_text="Simulator device IPv4 address",
-                                multiline=False, size_hint_y=None, height=dp(48),
-                                background_normal="", background_active="", background_color=PANEL,
-                                foreground_color=TEXT, cursor_color=TEXT, padding=(dp(12),dp(12)))
-            panel.add_widget(self._label("SIMULATOR IPv4", "10sp", MUTED, True))
-            panel.add_widget(self.ip)
-            b = Button(text="CONNECT / RETRY", size_hint_y=None, height=dp(48),
-                       background_normal="", background_color=BLUE, color=TEXT, bold=True)
-            b.bind(on_press=self.connect)
-            panel.add_widget(b)
-            self.connection_detail = self._label("TCP 58585 • UDP 49002 / 40092", "11sp", MUTED)
-            panel.add_widget(self.connection_detail)
-            panel.add_widget(Widget())
-            self.content.add_widget(panel)
-
-    def generate_plan(self, *_):
-        dep = self.departure.text.strip().upper()
-        arr = self.arrival.text.strip().upper()
-        if len(dep) < 3 or len(arr) < 3:
-            self.plan_result.text = "Enter valid departure and arrival airport codes."
-            return
-        self.plan_result.text = f"ROUTE PREVIEW   {dep}  →  {arr}\nAircraft: {self.aircraft.text.strip()}\nRoute generation is a preview only; no route has been sent to Aerofly."
-    def connect(self,*_):
+    def connect(self, *_):
         self.telemetry.set_host(self.ip.text)
         with self.telemetry.lock:
-            self.telemetry.data["message"]=f"Trying TCP {self.ip.text.strip()}:{self.telemetry.TCP_PORT}; UDP listeners active"
-        if not self.telemetry.running:self.telemetry.start()
+            self.telemetry.data["message"] = (
+                f"Trying TCP {self.ip.text.strip()}:{self.telemetry.TCP_PORT}; UDP listeners active"
+            )
+        if not self.telemetry.running:
+            self.telemetry.start()
 
-    def refresh(self,*_):
-        d=self.telemetry.snapshot()
-        self.state.text="CONNECTED" if d["connected"] else "WAITING"
-        self.state.color=GREEN if d["connected"] else MUTED
-        tile_info = f"tiles {len(self.map.tiles)}  errors {self.map.tile_errors}"
-        self.status.text=d["message"]+" | "+d["transport"]+" | packets "+str(d["packets"])+" | "+tile_info
+    def refresh(self, *_):
+        d = self.telemetry.snapshot()
+        self.state.text = "CONNECTED" if d["connected"] else "WAITING"
+        self.state.color = GREEN if d["connected"] else MUTED
+        self.status.text = (d["message"] + "  |  " + d["transport"] +
+                            "  |  packets " + str(d["packets"]))
         if self.map.tile_errors and not self.map.tiles:
-            detail = (self.map.last_tile_error or "unknown error").replace("\n", " ")[:95]
-            self.map_note.text = f"OSM tile error: {detail} • © OpenStreetMap contributors"
+            detail = (self.map.last_tile_error or "network unavailable").replace("\n", " ")[:90]
+            self.map_note.text = "OSM tile error: " + detail + " • © OpenStreetMap contributors"
         elif not self.map.tiles:
-            self.map_note.text = "Loading global OpenStreetMap… • © OpenStreetMap contributors"
+            self.map_note.text = "Loading OpenStreetMap tiles… • © OpenStreetMap contributors"
         elif d["lat"] is None:
-            self.map_note.text = "WORLD VIEW — waiting for aircraft telemetry • © OpenStreetMap contributors"
+            self.map_note.text = "Map ready; waiting for aircraft telemetry • © OpenStreetMap contributors"
         else:
             self.map_note.text = "LIVE AIRCRAFT POSITION • © OpenStreetMap contributors"
         if d["lat"] is not None and d["lon"] is not None:
-            self.map.set_position(d["lat"],d["lon"],d["heading"])
-            self.metrics.text=f'LAT {d["lat"]:.5f}  LON {d["lon"]:.5f}  ALT {d["alt_ft"]:.0f} ft  GS {d["speed_kt"]:.0f} kt  HDG {d["heading"]:03.0f}°'
+            self.map.set_position(d["lat"], d["lon"], d["heading"])
+            self.metrics.text = (
+                f'LAT {d["lat"]:.5f}  LON {d["lon"]:.5f}  ALT {d["alt_ft"]:.0f} ft  '
+                f'GS {d["speed_kt"]:.0f} kt  HDG {d["heading"]:03.0f}°'
+            )
         else:
-            self.metrics.text="LAT --  LON --  ALT -- ft  GS -- kt  HDG ---°"
+            self.metrics.text = "LAT --  LON --  ALT -- ft  GS -- kt  HDG ---°"
 
     def on_stop(self):
-        if hasattr(self,"telemetry"):self.telemetry.stop()
+        if hasattr(self, "telemetry"):
+            self.telemetry.stop()
+        if hasattr(self, "map"):
+            self.map.close()
 
 
 if __name__ == "__main__":
