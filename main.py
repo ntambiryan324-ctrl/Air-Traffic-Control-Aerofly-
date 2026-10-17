@@ -877,15 +877,11 @@ class AeroflyATCApp(App):
                                     break
                     def finish(_dt):
                         if found:
-                            if len(self.route_waypoints) >= 40:
-                                self.route_message.text = "Route already has 40 waypoints; remove one before adding an airport."
-                                return
-                            self.route_waypoints.append(found)
                             name_input.text = found["name"]
                             lat_input.text, lon_input.text = str(found["lat"]), str(found["lon"])
-                            refresh_route_view()
                             self.route_message.text = (
-                                f'Added {code}: {found["name"]}. Data: OurAirports (public domain; accuracy not guaranteed).'
+                                f'Found {code}: {found["name"]}. Review coordinates, then press ADD WAYPOINT. '
+                                "Data: OurAirports (public domain; accuracy not guaranteed)."
                             )
                         else:
                             self.route_message.text = f"No airport found for {code}. Try its ICAO/IATA code or enter coordinates."
