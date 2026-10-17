@@ -152,6 +152,32 @@ class MovingMap(StencilView):
         self.route_waypoints = list(waypoints or [])
         self.redraw()
 
+    def fit_route(self):
+        points = []
+        for wp in self.route_waypoints:
+            try:
+                lat, lon = float(wp["lat"]), float(wp["lon"])
+                if -90 <= lat <= 90 and -180 <= lon <= 180:
+                    points.append((lat, lon))
+            except (KeyError, TypeError, ValueError):
+                continue
+        if not points:
+            return
+        self.follow = False
+        self.center_lat = sum(p[0] for p in points) / len(points)
+        # Regional-route fitting; antimeridian-aware bounds can be added later.
+        self.center_lon = sum(p[1] for p in points) / len(points)
+        best_zoom = 3
+        for candidate in range(18, 2, -1):
+            projected = [self._latlon_to_world(lat, lon, candidate) for lat, lon in points]
+            width_px = (max(p[0] for p in projected) - min(p[0] for p in projected)) * self.TILE_SIZE
+            height_px = (max(p[1] for p in projected) - min(p[1] for p in projected)) * self.TILE_SIZE
+            if width_px <= max(1, self.width * 0.72) and height_px <= max(1, self.height * 0.72):
+                best_zoom = candidate
+                break
+        self.zoom = best_zoom
+        self.redraw()
+
     def center_plane(self):
         self.follow = True
         if self.aircraft_lat is not None:
@@ -929,17 +955,30 @@ class AeroflyATCApp(App):
             refresh_route_view()
             self.route_message.text = "Route cleared."
 
+        def fit_route(*_):
+            if not self.route_waypoints:
+                self.route_message.text = "Add at least one waypoint before fitting the route."
+                return
+            self.map.fit_route()
+            self.route_message.text = "Map fitted to planned route. Use RECENTER to return to aircraft-follow mode."
+
         def export_gpx(*_):
             try:
                 path = os.path.join(self.user_data_dir, "aerofly_route.gpx")
                 with open(path, "w", encoding="utf-8") as handle:
-                    handle.write('<?xml version="1.0" encoding="UTF-8"?>\n')
-                    handle.write('<gpx version="1.1" creator="Aerofly ATC" xmlns="http://www.topografix.com/GPX/1/1">\n')
+                    handle.write('<?xml version="1.0" encoding="UTF-8"?>\\n')
+                    handle.write('<gpx version="1.1" creator="Aerofly ATC" xmlns="http://www.topografix.com/GPX/1/1">\\n')
                     for wp in self.route_waypoints:
                         safe_name = wp["name"].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-                        handle.write(f'  <wpt lat="{wp["lat"]:.7f}" lon="{wp["lon"]:.7f}"><name>{safe_name}</name></wpt>\n')
-                    handle.write('</gpx>\n')
-                self.route_message.text = "GPX exported to app storage: " + path
+                        handle.write(f'  <wpt lat="{wp["lat"]:.7f}" lon="{wp["lon"]:.7f}"><name>{safe_name}</name></wpt>\\n')
+                    if self.route_waypoints:
+                        handle.write('  <rte><name>Aerofly ATC Route</name>\\n')
+                        for wp in self.route_waypoints:
+                            safe_name = wp["name"].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                            handle.write(f'    <rtept lat="{wp["lat"]:.7f}" lon="{wp["lon"]:.7f}"><name>{safe_name}</name></rtept>\\n')
+                        handle.write('  </rte>\\n')
+                    handle.write('</gpx>\\n')
+                self.route_message.text = "GPX route exported to app storage: " + path
             except OSError as exc:
                 self.route_message.text = "GPX export failed: " + str(exc)[:100]
 
@@ -967,8 +1006,9 @@ class AeroflyATCApp(App):
         self.route_message.height = dp(38)
         body.add_widget(self.route_message)
         bottom = BoxLayout(size_hint_y=None, height=dp(42), spacing=dp(6))
-        bottom.add_widget(make_button("UNDO LAST", undo_waypoint))
-        bottom.add_widget(make_button("CLEAR ROUTE", clear_route))
+        bottom.add_widget(make_button("FIT ROUTE", fit_route))
+        bottom.add_widget(make_button("UNDO", undo_waypoint))
+        bottom.add_widget(make_button("CLEAR", clear_route))
         bottom.add_widget(make_button("EXPORT GPX", export_gpx, BLUE))
         body.add_widget(bottom)
         refresh_route_view()
