@@ -6,6 +6,7 @@ import ssl
 import threading
 import time
 import urllib.request
+from urllib.error import URLError
 
 import certifi
 from io import BytesIO
@@ -51,9 +52,34 @@ class MovingMap(StencilView):
         app = App.get_running_app()
         self.cache_dir = cache_dir or os.path.join(getattr(app, "user_data_dir", "."), "osm_tiles")
         os.makedirs(self.cache_dir, exist_ok=True)
-        # Use a bundled Mozilla CA store on Android; keep certificate and hostname
-        # verification enabled instead of bypassing TLS checks.
-        self._ssl_context = ssl.create_default_context(cafile=certifi.where())
+        # Android's Python/OpenSSL build may not expose the same default trust
+        # paths as desktop Python. Try bundled Mozilla roots first, then platform
+        # defaults and Android's system CA directory. All contexts keep hostname
+        # checking and CERT_REQUIRED enabled.
+        self._ssl_contexts = []
+        try:
+            self._ssl_contexts.append(
+                ("Mozilla certifi bundle", ssl.create_default_context(cafile=certifi.where()))
+            )
+        except Exception:
+            pass
+        try:
+            self._ssl_contexts.append(("Python platform trust", ssl.create_default_context()))
+        except Exception:
+            pass
+        android_ca_dir = "/system/etc/security/cacerts"
+        if os.path.isdir(android_ca_dir):
+            try:
+                android_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+                android_ctx.check_hostname = True
+                android_ctx.verify_mode = ssl.CERT_REQUIRED
+                android_ctx.load_default_certs()
+                android_ctx.load_verify_locations(capath=android_ca_dir)
+                self._ssl_contexts.append(("Android system CA store", android_ctx))
+            except Exception:
+                pass
+        if not self._ssl_contexts:
+            raise RuntimeError("No TLS trust store could be initialized on this device.")
         self.center_lat = 0.3476
         self.center_lon = 32.5825
         self.zoom = 7
@@ -168,10 +194,35 @@ class MovingMap(StencilView):
                         "Accept": "image/png,image/*;q=0.8,*/*;q=0.5",
                     },
                 )
-                with urllib.request.urlopen(request, timeout=12, context=self._ssl_context) as response:
-                    if response.status != 200:
-                        raise OSError("HTTP " + str(response.status))
-                    data = response.read()
+                last_verify_error = None
+                data = None
+                for trust_name, trust_context in self._ssl_contexts:
+                    try:
+                        with urllib.request.urlopen(
+                            request, timeout=12, context=trust_context
+                        ) as response:
+                            if response.status != 200:
+                                raise OSError("HTTP " + str(response.status))
+                            data = response.read()
+                        break
+                    except ssl.SSLCertVerificationError as exc:
+                        last_verify_error = exc
+                    except URLError as exc:
+                        # urllib wraps TLS failures in URLError on some Python
+                        # builds, including Android's python-for-android runtime.
+                        reason = getattr(exc, "reason", None)
+                        if (isinstance(reason, ssl.SSLCertVerificationError)
+                                or "CERTIFICATE_VERIFY_FAILED" in str(exc)):
+                            last_verify_error = exc
+                            continue
+                        raise
+                if data is None:
+                    if last_verify_error is not None:
+                        raise OSError(
+                            "OSM TLS certificate verification failed with bundled, "
+                            "platform and Android CA stores: " + str(last_verify_error)
+                        )
+                    raise OSError("OSM tile download returned no data")
                 if not data:
                     raise OSError("Empty OSM tile response")
                 os.makedirs(os.path.dirname(path), exist_ok=True)
