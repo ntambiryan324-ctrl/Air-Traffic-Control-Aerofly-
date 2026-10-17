@@ -485,94 +485,114 @@ class Telemetry:
             time.sleep(.5)
 
     def _tcp_loop(self):
+        """Connect to the simulator, trying alternate local endpoints if one is silent."""
         while self.running:
-            s=None
-            requested_host=self.host
-            connected_host=requested_host
-            try:
-                # On the same Android device, Aerofly may expose the service on loopback
-                # or only on the device's active IPv4 interface. Try both automatically.
-                # The official FSWidgets setup specifies the simulator device's local IP,
-                # not 127.0.0.1. Try the active interface first, loopback second.
-                candidates=[]
-                detected=self.detect_local_ip()
-                for candidate in (requested_host, detected, "127.0.0.1"):
-                    if candidate and candidate not in candidates:
-                        candidates.append(candidate)
-                last_error=None
-                for candidate in candidates:
+            requested_host = self.host
+            detected = self.detect_local_ip()
+            candidates = []
+            # Try the configured address first, then loopback and the active interface.
+            # A successful TCP handshake alone is not proof that the simulator stream is there.
+            for candidate in (requested_host, "127.0.0.1", detected):
+                if candidate and candidate not in candidates:
+                    candidates.append(candidate)
+            connected = False
+            errors = []
+            for connected_host in candidates:
+                if not self.running or requested_host != self.host:
+                    break
+                s = None
+                received_this_attempt = 0
+                try:
                     with self.lock:
-                        self.data["message"]=f"Connecting to {candidate}:{self.TCP_PORT}..."
-                    try:
-                        s=socket.create_connection((candidate,self.TCP_PORT),timeout=4)
-                        connected_host=candidate
-                        break
-                    except OSError as e:
-                        last_error=e
-                if s is None:
-                    raise last_error or OSError("No simulator address could be reached")
-                s.settimeout(2)
-                self.tcp=s
-                # Send a complete HTTP/1.1 request. Some server implementations
-                # expect the Host header before starting the FSWidgets data stream.
-                request = (
-                    f"GET / HTTP/1.1\r\n"
-                    f"Host: {connected_host}:{self.TCP_PORT}\r\n"
-                    "User-Agent: AeroflyATC/4.0\r\n"
-                    "Accept: */*\r\n"
-                    "Connection: keep-alive\r\n\r\n"
-                ).encode("ascii", "replace")
-                s.sendall(request)
-                with self.lock:
-                    self.data["message"]=f"TCP connected at {connected_host}:{self.TCP_PORT}; probing FSWidgets stream"
-                buf=b""
-                while self.running and requested_host==self.host:
-                    try:
-                        chunk=s.recv(8192)
-                        if not chunk:
-                            break
-                        self._record_rx(chunk, "TCP 58585", connected_host)
-                        buf+=chunk
-                        # Accept CR, LF, or CRLF record separators. A CR-only stream
-                        # must not sit forever in the buffer waiting for a newline.
-                        buf=buf.replace(b"\r", b"\n")
-                        while b"\n" in buf:
-                            line,buf=buf.split(b"\n",1)
-                            self._parse(line,"TCP 58585",connected_host)
-                        # Some implementations send one complete XGPS/XATT record without
-                        # a trailing newline. Parse it once enough fields are present.
-                        if buf.startswith((b"XGPS", b"XATT")):
-                            fields=buf.count(b",")
-                            if (buf.startswith(b"XGPS") and fields >= 5) or (buf.startswith(b"XATT") and fields >= 3):
-                                self._parse(buf,"TCP 58585",connected_host)
-                                buf=b""
-                    except socket.timeout:
-                        if time.time()-self.data["last_packet"]>5:
+                        self.data["message"] = f"Probing {connected_host}:{self.TCP_PORT}..."
+                    s = socket.create_connection((connected_host, self.TCP_PORT), timeout=3)
+                    s.settimeout(1.5)
+                    self.tcp = s
+                    # Aerofly's FSWidgets service expects the client to speak first.
+                    # Keep this wake-up request minimal for compatibility with existing clients.
+                    s.sendall(b"GET / HTTP/1.1\\r\\n\\r\\n")
+                    started = time.time()
+                    last_rx = started
+                    buf = b""
+                    with self.lock:
+                        self.data["message"] = f"TCP connected to {connected_host}; waiting for FSWidgets telemetry"
+                    while self.running and requested_host == self.host:
+                        try:
+                            chunk = s.recv(8192)
+                            if not chunk:
+                                errors.append(f"{connected_host}: server closed stream")
+                                break
+                            received_this_attempt += len(chunk)
+                            last_rx = time.time()
+                            self._record_rx(chunk, "TCP 58585", connected_host)
+                            buf += chunk
+                            # Tolerate CR, LF, and CRLF delimiters.
+                            buf = buf.replace(b"\\r", b"\\n")
+                            while b"\\n" in buf:
+                                line, buf = buf.split(b"\\n", 1)
+                                self._parse(line, "TCP 58585", connected_host)
+                            # Some streams omit a final newline.
+                            if buf.startswith((b"XGPS", b"XATT")):
+                                fields = buf.count(b",")
+                                if ((buf.startswith(b"XGPS") and fields >= 5) or
+                                        (buf.startswith(b"XATT") and fields >= 3)):
+                                    self._parse(buf, "TCP 58585", connected_host)
+                                    buf = b""
                             with self.lock:
-                                self.data["connected"]=False
-                                received = self.data["rx_bytes"]
+                                got_packet = self.data["last_packet"] >= started
+                            if got_packet:
+                                connected = True
+                                # Once telemetry is flowing, keep this socket as the active stream.
+                                continue
+                            # A TCP handshake can reach the wrong interface/service.
+                            # Move on if this endpoint stays silent during the probe window.
+                        except socket.timeout:
+                            now = time.time()
+                            with self.lock:
+                                got_packet = self.data["last_packet"] >= started
+                                total_rx = self.data["rx_bytes"]
                                 preview = self.data["last_rx_preview"]
-                                if received:
+                            if got_packet:
+                                connected = True
+                                continue
+                            if received_this_attempt == 0 and now - started >= 4.5:
+                                errors.append(f"{connected_host}: TCP connected but no bytes arrived")
+                                break
+                            if received_this_attempt > 0 and now - last_rx >= 4.5:
+                                with self.lock:
+                                    self.data["connected"] = False
                                     self.data["message"] = (
-                                        f"TCP connected; received {received} bytes but no recognized telemetry. "
+                                        f"Received {total_rx} bytes from {connected_host}, but no XGPS/XATT record parsed. "
                                         f"Last payload: {preview or '[non-text data]'}"
                                     )
-                                else:
-                                    self.data["message"] = (
-                                        f"TCP connected at {connected_host}:{self.TCP_PORT}, but received 0 bytes. "
-                                        "Check Aerofly FSWidgets data setting and simulator IP."
-                                    )
-            except OSError as e:
+                                # Keep the stream open when bytes arrive: diagnostics need the actual payload.
+                    if connected:
+                        # If telemetry had arrived, the inner loop remains alive until the socket closes.
+                        pass
+                except OSError as exc:
+                    errors.append(f"{connected_host}: {exc}")
+                finally:
+                    if s:
+                        try:
+                            s.close()
+                        except OSError:
+                            pass
+                    if self.tcp is s:
+                        self.tcp = None
+                if connected:
+                    # A live endpoint disconnected; reconnect using the configured order.
+                    break
+            if not connected and self.running and requested_host == self.host:
                 with self.lock:
-                    self.data["connected"]=False
-                    self.data["message"]=f"TCP {self.TCP_PORT} failed: {e}. Check Aerofly FSWidgets setting and target IP."
-                time.sleep(2)
-            finally:
-                if s:
-                    try:s.close()
-                    except OSError:pass
-                self.tcp=None
-            time.sleep(1)
+                    if self.data["last_packet"] and time.time() - self.data["last_packet"] < 5:
+                        self.data["connected"] = True
+                    else:
+                        self.data["connected"] = False
+                        detail = "; ".join(errors[-3:]) or "no endpoint responded"
+                        self.data["message"] = "No live telemetry stream. " + detail
+                time.sleep(1.5)
+            else:
+                time.sleep(0.5)
 
     def snapshot(self):
         with self.lock:
@@ -599,77 +619,106 @@ class AeroflyATCApp(App):
 
     def build(self):
         self.telemetry = Telemetry()
-        root = BoxLayout(orientation="vertical", spacing=dp(0), padding=dp(0))
+        root = BoxLayout(orientation="vertical", spacing=dp(0), padding=(dp(10), dp(8), dp(10), dp(8)))
         with root.canvas.before:
             Color(*BG)
             self._bg_rect = Rectangle(pos=root.pos, size=root.size)
         root.bind(pos=lambda w, *_: setattr(self._bg_rect, "pos", w.pos),
                   size=lambda w, *_: setattr(self._bg_rect, "size", w.size))
 
-        header = BoxLayout(size_hint_y=None, height=dp(44), padding=(dp(12),0,dp(10),0), spacing=dp(8))
-        header.add_widget(self._label("AEROFLY  /  TELEMETRY TEST", "14sp", TEXT, True))
-        self.state = self._label("WAITING", "11sp", MUTED, True, "right")
+        def card(orientation="vertical", height=None, padding=8, spacing=4):
+            panel = BoxLayout(orientation=orientation, padding=dp(padding), spacing=dp(spacing),
+                              size_hint_y=None if height else 1,
+                              height=dp(height) if height else None)
+            with panel.canvas.before:
+                Color(*PANEL)
+                panel._panel_bg = Rectangle(pos=panel.pos, size=panel.size)
+            panel.bind(pos=lambda w, *_: setattr(w._panel_bg, "pos", w.pos),
+                       size=lambda w, *_: setattr(w._panel_bg, "size", w.size))
+            return panel
+
+        def make_button(title, action, color=PANEL, width=None):
+            button = Button(text=title, size_hint_x=None if width else 1,
+                            width=dp(width) if width else 1,
+                            background_normal="", background_down="",
+                            background_color=color, color=TEXT, bold=True, font_size="11sp")
+            button.bind(on_press=action)
+            return button
+
+        header = BoxLayout(size_hint_y=None, height=dp(54), spacing=dp(8))
+        brand = BoxLayout(orientation="vertical", spacing=dp(0))
+        brand.add_widget(self._label("AEROFLY  /  FLIGHT DECK", "10sp", BLUE, True))
+        brand.add_widget(self._label("Live map & flight planning", "16sp", TEXT, True))
+        header.add_widget(brand)
+        self.state = self._label("NO DATA", "10sp", MUTED, True, "right")
         self.state.size_hint_x = None
-        self.state.width = dp(94)
+        self.state.width = dp(86)
         header.add_widget(self.state)
         root.add_widget(header)
 
-        map_head = BoxLayout(size_hint_y=None, height=dp(28), padding=(dp(12),0), spacing=dp(6))
-        map_head.add_widget(self._label("OPENSTREETMAP", "10sp", BLUE, True))
-        map_head.add_widget(self._label("DRAG TO PAN  •  +/- TO ZOOM", "9sp", MUTED, False, "right"))
+        map_head = BoxLayout(size_hint_y=None, height=dp(30), padding=(dp(4), 0), spacing=dp(6))
+        map_head.add_widget(self._label("MOVING MAP", "11sp", TEXT, True))
+        map_head.add_widget(self._label("OPENSTREETMAP  •  LIVE POSITION", "9sp", MUTED, False, "right"))
         root.add_widget(map_head)
 
         self.map = MovingMap(cache_dir=os.path.join(self.user_data_dir, "osm_tiles"))
         root.add_widget(self.map)
 
-        map_tools = BoxLayout(size_hint_y=None, height=dp(42), padding=(dp(8),dp(3)), spacing=dp(6))
-        for title, action in (("−", lambda *_: self.map.zoom_by(-1)),
-                              ("CENTER AIRCRAFT", lambda *_: self.map.center_plane()),
-                              ("+", lambda *_: self.map.zoom_by(1)),
-                              ("RETRY MAP", lambda *_: self.map.retry_tiles())):
-            b = Button(text=title, background_normal="", background_color=PANEL,
-                       color=TEXT, font_size="12sp")
-            b.bind(on_press=action)
-            map_tools.add_widget(b)
+        map_tools = BoxLayout(size_hint_y=None, height=dp(42), padding=(dp(2), dp(4)), spacing=dp(6))
+        map_tools.add_widget(make_button("−", lambda *_: self.map.zoom_by(-1), width=48))
+        map_tools.add_widget(make_button("RECENTER", lambda *_: self.map.center_plane(), BLUE))
+        map_tools.add_widget(make_button("+", lambda *_: self.map.zoom_by(1), width=48))
+        map_tools.add_widget(make_button("RETRY TILES", lambda *_: self.map.retry_tiles(), width=104))
         root.add_widget(map_tools)
 
-        self.metrics = self._label("LAT --   LON --   ALT -- ft   GS -- kt   HDG ---°", "11sp", TEXT, True)
-        self.metrics.size_hint_y = None
-        self.metrics.height = dp(32)
-        self.metrics.padding = (dp(12),0)
-        root.add_widget(self.metrics)
+        stats = card(orientation="horizontal", height=72, padding=8, spacing=4)
+        self.stat_values = {}
+        for key, title, value in (
+            ("alt", "ALTITUDE", "--- ft"),
+            ("gs", "GROUND SPEED", "--- kt"),
+            ("hdg", "TRACK / HDG", "---°"),
+            ("pos", "POSITION", "Waiting"),
+        ):
+            item = BoxLayout(orientation="vertical", spacing=dp(2))
+            item.add_widget(self._label(title, "8sp", MUTED, True))
+            value_label = self._label(value, "12sp", TEXT, True)
+            item.add_widget(value_label)
+            self.stat_values[key] = value_label
+            stats.add_widget(item)
+        root.add_widget(stats)
 
-        connection = BoxLayout(size_hint_y=None, height=dp(48), padding=(dp(8),dp(4)), spacing=dp(6))
-        self.ip = TextInput(text=self.telemetry.host, hint_text="Simulator device IPv4 address",
+        connection = card(orientation="vertical", height=90, padding=8, spacing=5)
+        connection.add_widget(self._label("SIMULATOR CONNECTION", "9sp", BLUE, True))
+        row = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(6))
+        self.ip = TextInput(text=self.telemetry.host, hint_text="Simulator device IP address",
                             multiline=False, size_hint_x=0.68,
                             background_normal="", background_active="",
-                            background_color=PANEL, foreground_color=TEXT,
-                            cursor_color=TEXT, hint_text_color=MUTED,
-                            padding=(dp(10),dp(10)))
-        connect = Button(text="CONNECT", size_hint_x=0.32, background_normal="",
-                         background_color=BLUE, color=TEXT, bold=True)
-        connect.bind(on_press=self.connect)
-        connection.add_widget(self.ip)
-        connection.add_widget(connect)
+                            background_color=(0.025, 0.04, 0.055, 1), foreground_color=TEXT,
+                            cursor_color=BLUE, hint_text_color=MUTED,
+                            padding=(dp(10), dp(9)))
+        connect = make_button("CONNECT", self.connect, BLUE)
+        row.add_widget(self.ip)
+        row.add_widget(connect)
+        connection.add_widget(row)
         root.add_widget(connection)
 
-        self.map_note = self._label("Loading OpenStreetMap tiles… • © OpenStreetMap contributors", "9sp", MUTED)
-        self.map_note.size_hint_y = None
-        self.map_note.height = dp(22)
-        self.map_note.padding = (dp(12),0)
-        root.add_widget(self.map_note)
-
-        self.status = self._label("TCP 58585  •  UDP 49002 / 40092  •  Enable FSWidgets data in Aerofly", "10sp", MUTED)
+        self.status = self._label("TCP 58585  •  Enable “Send flight data to FSWidgets Apps” in Aerofly", "9sp", MUTED)
         self.status.size_hint_y = None
-        self.status.height = dp(36)
-        self.status.padding = (dp(12),0)
+        self.status.height = dp(32)
+        self.status.padding = (dp(4), 0)
         root.add_widget(self.status)
 
-        self.rx_debug = self._label("RX DIAGNOSTICS  •  0 bytes received", "9sp", MUTED)
+        self.rx_debug = self._label("NETWORK DIAGNOSTICS  •  waiting for first payload", "8sp", MUTED)
         self.rx_debug.size_hint_y = None
-        self.rx_debug.height = dp(25)
-        self.rx_debug.padding = (dp(12),0)
+        self.rx_debug.height = dp(26)
+        self.rx_debug.padding = (dp(4), 0)
         root.add_widget(self.rx_debug)
+
+        self.map_note = self._label("Map tiles © OpenStreetMap contributors", "8sp", MUTED)
+        self.map_note.size_hint_y = None
+        self.map_note.height = dp(18)
+        self.map_note.padding = (dp(4), 0)
+        root.add_widget(self.map_note)
 
         Clock.schedule_once(lambda *_: self.telemetry.start(), 0.4)
         Clock.schedule_interval(self.refresh, 0.5)
@@ -686,31 +735,34 @@ class AeroflyATCApp(App):
 
     def refresh(self, *_):
         d = self.telemetry.snapshot()
-        self.state.text = "CONNECTED" if d["connected"] else "WAITING"
-        self.state.color = GREEN if d["connected"] else MUTED
-        self.status.text = (d["message"] + "  |  " + d["transport"] +
-                            "  |  packets " + str(d["packets"]))
+        live = d["connected"] and d["lat"] is not None
+        self.state.text = "LIVE" if live else ("TCP LINK" if d["rx_bytes"] else "NO DATA")
+        self.state.color = GREEN if live else (BLUE if d["rx_bytes"] else MUTED)
+        self.status.text = d["message"] + "  |  " + d["transport"] + "  |  records " + str(d["packets"])
         preview = d["last_rx_preview"] or "no payload received yet"
         self.rx_debug.text = (
             f'RX {d["rx_bytes"]} bytes  •  {d["last_rx_transport"] or "no source"}  •  {preview}'
         )
         if self.map.tile_errors and not self.map.tiles:
-            detail = (self.map.last_tile_error or "network unavailable").replace("\n", " ")[:90]
-            self.map_note.text = "OSM tile error: " + detail + " • © OpenStreetMap contributors"
+            detail = (self.map.last_tile_error or "network unavailable").replace("\\n", " ")[:90]
+            self.map_note.text = "MAP ERROR  •  " + detail + "  •  © OpenStreetMap"
         elif not self.map.tiles:
-            self.map_note.text = "Loading OpenStreetMap tiles… • © OpenStreetMap contributors"
+            self.map_note.text = "Loading map tiles…  •  © OpenStreetMap contributors"
         elif d["lat"] is None:
-            self.map_note.text = "Map ready; waiting for aircraft telemetry • © OpenStreetMap contributors"
+            self.map_note.text = "MAP READY  •  Waiting for valid aircraft coordinates"
         else:
-            self.map_note.text = "LIVE AIRCRAFT POSITION • © OpenStreetMap contributors"
+            self.map_note.text = "LIVE AIRCRAFT POSITION  •  © OpenStreetMap contributors"
         if d["lat"] is not None and d["lon"] is not None:
             self.map.set_position(d["lat"], d["lon"], d["heading"])
-            self.metrics.text = (
-                f'LAT {d["lat"]:.5f}  LON {d["lon"]:.5f}  ALT {d["alt_ft"]:.0f} ft  '
-                f'GS {d["speed_kt"]:.0f} kt  HDG {d["heading"]:03.0f}°'
-            )
+            self.stat_values["alt"].text = f'{d["alt_ft"]:.0f} ft'
+            self.stat_values["gs"].text = f'{d["speed_kt"]:.0f} kt'
+            self.stat_values["hdg"].text = f'{d["heading"]:03.0f}°'
+            self.stat_values["pos"].text = f'{d["lat"]:.2f}, {d["lon"]:.2f}'
         else:
-            self.metrics.text = "LAT --  LON --  ALT -- ft  GS -- kt  HDG ---°"
+            self.stat_values["alt"].text = "--- ft"
+            self.stat_values["gs"].text = "--- kt"
+            self.stat_values["hdg"].text = "---°"
+            self.stat_values["pos"].text = "Waiting"
 
     def on_stop(self):
         if hasattr(self, "telemetry"):
