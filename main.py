@@ -386,6 +386,8 @@ class Telemetry:
         self.data = {"connected": False, "transport": "WAITING", "lat": None, "lon": None,
                      "alt_ft": 0.0, "speed_kt": 0.0, "heading": 0.0, "pitch": 0.0,
                      "bank": 0.0, "sim": "", "packets": 0, "last_packet": 0.0,
+                     "rx_bytes": 0, "last_rx_preview": "", "last_rx_time": 0.0,
+                     "last_rx_transport": "", "last_rx_source": "",
                      "message": "Enter simulator IP, then tap CONNECT"}
 
     def start(self):
@@ -407,11 +409,29 @@ class Telemetry:
             try: s.close()
             except OSError: pass
 
+    def _record_rx(self, raw, transport, source):
+        """Record the real incoming payload for diagnosis even when parsing fails."""
+        text = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw)
+        printable = "".join(ch if ch.isprintable() else " " for ch in text)
+        preview = re.sub(r"\s+", " ", printable).strip()[:112]
+        with self.lock:
+            self.data["rx_bytes"] += len(raw)
+            self.data["last_rx_preview"] = preview or repr(raw[:40])
+            self.data["last_rx_time"] = time.time()
+            self.data["last_rx_transport"] = transport
+            self.data["last_rx_source"] = str(source)
+
     def _parse(self, raw, transport, source):
         text = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else raw
+        # Strip NUL padding and tolerate a protocol token after a leading prefix.
+        text = text.replace("\\x00", "").replace("\\ufeff", "")
         # Aerofly/FSWidgets streams may delimit records with CR, LF, or CRLF.
         for line in re.split(r"[\r\n]+", text):
             line=line.strip()
+            if "XGPS" in line and not line.startswith("XGPS"):
+                line = line[line.find("XGPS"):]
+            elif "XATT" in line and not line.startswith("XATT"):
+                line = line[line.find("XATT"):]
             try:
                 if line.startswith("XGPS"):
                     p=line[4:].strip().split(",")
@@ -454,6 +474,7 @@ class Telemetry:
                     for port,s in opened:
                         try:
                             raw,addr=s.recvfrom(65535)
+                            self._record_rx(raw, "UDP "+str(port), addr[0])
                             self._parse(raw,"UDP "+str(port),addr[0])
                         except socket.timeout: pass
                         except OSError: break
@@ -492,15 +513,25 @@ class Telemetry:
                     raise last_error or OSError("No simulator address could be reached")
                 s.settimeout(2)
                 self.tcp=s
-                s.sendall(b"GET / HTTP/1.1\r\n\r\n")
+                # Send a complete HTTP/1.1 request. Some server implementations
+                # expect the Host header before starting the FSWidgets data stream.
+                request = (
+                    f"GET / HTTP/1.1\\r\\n"
+                    f"Host: {connected_host}:{self.TCP_PORT}\\r\\n"
+                    "User-Agent: AeroflyATC/4.0\\r\\n"
+                    "Accept: */*\\r\\n"
+                    "Connection: keep-alive\\r\\n\\r\\n"
+                ).encode("ascii", "replace")
+                s.sendall(request)
                 with self.lock:
-                    self.data["message"]=f"TCP connected at {connected_host}:{self.TCP_PORT}; waiting for telemetry"
+                    self.data["message"]=f"TCP connected at {connected_host}:{self.TCP_PORT}; probing FSWidgets stream"
                 buf=b""
                 while self.running and requested_host==self.host:
                     try:
                         chunk=s.recv(8192)
                         if not chunk:
                             break
+                        self._record_rx(chunk, "TCP 58585", connected_host)
                         buf+=chunk
                         # Accept CR, LF, or CRLF record separators. A CR-only stream
                         # must not sit forever in the buffer waiting for a newline.
@@ -519,7 +550,18 @@ class Telemetry:
                         if time.time()-self.data["last_packet"]>5:
                             with self.lock:
                                 self.data["connected"]=False
-                                self.data["message"]=f"TCP reachable at {connected_host}:{self.TCP_PORT}, but no telemetry received. Enable Send flight data to FSWidgets Apps in Aerofly."
+                                received = self.data["rx_bytes"]
+                                preview = self.data["last_rx_preview"]
+                                if received:
+                                    self.data["message"] = (
+                                        f"TCP connected; received {received} bytes but no recognized telemetry. "
+                                        f"Last payload: {preview or '[non-text data]'}"
+                                    )
+                                else:
+                                    self.data["message"] = (
+                                        f"TCP connected at {connected_host}:{self.TCP_PORT}, but received 0 bytes. "
+                                        "Check Aerofly FSWidgets data setting and simulator IP."
+                                    )
             except OSError as e:
                 with self.lock:
                     self.data["connected"]=False
@@ -623,6 +665,12 @@ class AeroflyATCApp(App):
         self.status.padding = (dp(12),0)
         root.add_widget(self.status)
 
+        self.rx_debug = self._label("RX DIAGNOSTICS  •  0 bytes received", "9sp", MUTED)
+        self.rx_debug.size_hint_y = None
+        self.rx_debug.height = dp(25)
+        self.rx_debug.padding = (dp(12),0)
+        root.add_widget(self.rx_debug)
+
         Clock.schedule_once(lambda *_: self.telemetry.start(), 0.4)
         Clock.schedule_interval(self.refresh, 0.5)
         return root
@@ -642,6 +690,10 @@ class AeroflyATCApp(App):
         self.state.color = GREEN if d["connected"] else MUTED
         self.status.text = (d["message"] + "  |  " + d["transport"] +
                             "  |  packets " + str(d["packets"]))
+        preview = d["last_rx_preview"] or "no payload received yet"
+        self.rx_debug.text = (
+            f'RX {d["rx_bytes"]} bytes  •  {d["last_rx_transport"] or "no source"}  •  {preview}'
+        )
         if self.map.tile_errors and not self.map.tiles:
             detail = (self.map.last_tile_error or "network unavailable").replace("\n", " ")[:90]
             self.map_note.text = "OSM tile error: " + detail + " • © OpenStreetMap contributors"
