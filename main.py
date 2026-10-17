@@ -1,6 +1,8 @@
 import os
 import math
 import json
+import csv
+import shutil
 import re
 import socket
 import ssl
@@ -651,6 +653,8 @@ class AeroflyATCApp(App):
     def build(self):
         self.telemetry = Telemetry()
         self.route_file = os.path.join(self.user_data_dir, "route_waypoints.json")
+        self.airports_file = os.path.join(self.user_data_dir, "ourairports_airports.csv")
+        self.route_workers = ThreadPoolExecutor(max_workers=1, thread_name_prefix="airport-lookup")
         self.route_waypoints = self.load_route()
         root = BoxLayout(orientation="vertical", spacing=dp(0), padding=(dp(10), dp(8), dp(10), dp(8)))
         with root.canvas.before:
@@ -807,6 +811,10 @@ class AeroflyATCApp(App):
         lon_input = TextInput(hint_text="Longitude (−180 to 180)", multiline=False,
                               input_filter="float", size_hint_y=None, height=dp(42))
         body.add_widget(name_input)
+        airport_row = BoxLayout(size_hint_y=None, height=dp(42), spacing=dp(6))
+        airport_input = TextInput(hint_text="Airport ICAO / IATA (e.g. HUEN, EBBR)", multiline=False,
+                                  size_hint_x=0.68, padding=(dp(8), dp(9)))
+        airport_row.add_widget(airport_input)
         coord_row = BoxLayout(size_hint_y=None, height=dp(42), spacing=dp(6))
         coord_row.add_widget(lat_input)
         coord_row.add_widget(lon_input)
@@ -830,6 +838,64 @@ class AeroflyATCApp(App):
                              (f"   +{leg:.1f} NM" if i else "   START"))
             listing.text = "\n".join(lines) if lines else "No waypoints yet. Add the first point above."
             self.save_route()
+
+        def lookup_airport(*_):
+            code = airport_input.text.strip().upper()
+            if not code:
+                self.route_message.text = "Enter an airport ICAO or IATA code first."
+                return
+            self.route_message.text = "Looking up " + code + " in the public-domain OurAirports dataset…"
+
+            def work():
+                try:
+                    if not os.path.isfile(self.airports_file):
+                        request = urllib.request.Request(
+                            "https://raw.githubusercontent.com/davidmegginson/ourairports-data/main/airports.csv",
+                            headers={"User-Agent": "AeroflyATC/3.1 (+https://github.com/ntambiryan324-ctrl/Air-Traffic-Control-Aerofly-)"},
+                        )
+                        with urllib.request.urlopen(request, timeout=35) as response:
+                            os.makedirs(os.path.dirname(self.airports_file), exist_ok=True)
+                            temp = self.airports_file + ".tmp"
+                            with open(temp, "wb") as output:
+                                shutil.copyfileobj(response, output)
+                            os.replace(temp, self.airports_file)
+                    found = None
+                    with open(self.airports_file, "r", encoding="utf-8-sig", newline="") as handle:
+                        for row in csv.DictReader(handle):
+                            codes = {
+                                (row.get("ident") or "").strip().upper(),
+                                (row.get("gps_code") or "").strip().upper(),
+                                (row.get("iata_code") or "").strip().upper(),
+                            }
+                            if code in codes and row.get("latitude_deg") and row.get("longitude_deg"):
+                                try:
+                                    lat, lon = float(row["latitude_deg"]), float(row["longitude_deg"])
+                                except (TypeError, ValueError):
+                                    continue
+                                if -90 <= lat <= 90 and -180 <= lon <= 180:
+                                    found = {"name": (row.get("name") or code)[:24], "lat": lat, "lon": lon}
+                                    break
+                    def finish(_dt):
+                        if found:
+                            if len(self.route_waypoints) >= 40:
+                                self.route_message.text = "Route already has 40 waypoints; remove one before adding an airport."
+                                return
+                            self.route_waypoints.append(found)
+                            name_input.text = found["name"]
+                            lat_input.text, lon_input.text = str(found["lat"]), str(found["lon"])
+                            refresh_route_view()
+                            self.route_message.text = (
+                                f'Added {code}: {found["name"]}. Data: OurAirports (public domain; accuracy not guaranteed).'
+                            )
+                        else:
+                            self.route_message.text = f"No airport found for {code}. Try its ICAO/IATA code or enter coordinates."
+                    Clock.schedule_once(finish, 0)
+                except Exception as exc:
+                    message = str(exc)[:120]
+                    Clock.schedule_once(lambda _dt, msg=message: setattr(
+                        self.route_message, "text", "Airport lookup failed: " + msg
+                    ), 0)
+            self.route_workers.submit(work)
 
         def add_waypoint(*_):
             try:
@@ -881,6 +947,8 @@ class AeroflyATCApp(App):
             except OSError as exc:
                 self.route_message.text = "GPX export failed: " + str(exc)[:100]
 
+        airport_row.add_widget(make_button("FIND AIRPORT", lookup_airport, BLUE))
+        body.add_widget(airport_row)
         actions.add_widget(make_button("ADD WAYPOINT", add_waypoint, BLUE))
         actions.add_widget(make_button("ADD LIVE POS", add_aircraft_position))
         body.add_widget(actions)
@@ -953,6 +1021,8 @@ class AeroflyATCApp(App):
     def on_stop(self):
         if hasattr(self, "telemetry"):
             self.telemetry.stop()
+        if hasattr(self, "route_workers"):
+            self.route_workers.shutdown(wait=False, cancel_futures=True)
         if hasattr(self, "map"):
             self.map.close()
 
