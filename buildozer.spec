@@ -4,8 +4,10 @@ package.name = aeroflyatc
 package.domain = org.aeroflycompanion
 source.dir = .
 source.include_exts = py,txt,png,jpg,jpeg,svg,kv
-version = 3.1.0
-requirements = python3==3.11.9,hostpython3==3.11.9,kivy==2.3.1,certifi
+source.exclude_dirs = tests, tools
+version = 4.0.0
+icon.filename = %(source.dir)s/icon.png
+requirements = python3==3.11.9,hostpython3==3.11.9,kivy==2.3.1
 orientation = portrait
 fullscreen = 0
 android.api = 34
