@@ -2,6 +2,12 @@
 
 Android companion for Aerofly FS Global (Kivy). Simulation use only, not for real-world navigation.
 
+## v4.1 stability and charts hand-off
+- PLAN and other pages remain mounted in a Kivy ScreenManager, avoiding widget detachment/reparenting on tab changes.
+- Button callbacks and page construction are guarded; UI exceptions are written to app-private `ui_errors.log` and surfaced in the UI.
+- Planning weather retrieves both METAR and TAF from AviationWeather.gov.
+- OPEN CHARTS opens the official Navigraph portal. Licensed chart content is not copied or bundled.
+
 ## Tabs
 - **GLOBE** - offline globe that follows the aircraft, route line, zoom, pan, centre.
 - **PLAN** - route, flight time, fuel, climb and descent points, vertical profile, live METAR, SimBrief import, GPX to clipboard.

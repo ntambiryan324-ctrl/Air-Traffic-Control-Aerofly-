@@ -4,6 +4,8 @@ import re
 import socket
 import threading
 import time
+import traceback
+import webbrowser
 
 from kivy.app import App
 from kivy.clock import Clock
@@ -19,6 +21,7 @@ from kivy.uix.togglebutton import ToggleButton
 from kivy.uix.label import Label
 from kivy.uix.scrollview import ScrollView
 from kivy.uix.stencilview import StencilView
+from kivy.uix.screenmanager import NoTransition, Screen, ScreenManager
 from kivy.uix.textinput import TextInput
 from kivy.uix.widget import Widget
 from kivy.utils import escape_markup
@@ -476,7 +479,15 @@ class AeroflyATCApp(App):
     def _button(self, text, cb, color=BLUE, height=44):
         b = Button(text=text, size_hint_y=None, height=dp(height), background_normal="",
                    background_color=color, color=TEXT, bold=True, font_size="11sp")
-        b.bind(on_press=cb)
+
+        def guarded_press(*args):
+            try:
+                return cb(*args)
+            except Exception as exc:
+                self._report_ui_error("button: " + text, exc)
+                return None
+
+        b.bind(on_press=guarded_press)
         return b
 
     def _scroll_label(self, markup=False, size="12sp"):
@@ -509,6 +520,7 @@ class AeroflyATCApp(App):
         self.alert_until = 0.0
         self.plan = {}
         self.metars = {}
+        self.tafs = {}
         self._llm = None
         self._llm_tried = False
         self.screen_mode = "map"
@@ -528,12 +540,24 @@ class AeroflyATCApp(App):
         head.add_widget(self.state)
         self.root_box.add_widget(head)
 
-        self.content = BoxLayout(orientation="vertical")
+        # Keep every tab mounted in a ScreenManager. Avoid detaching and re-adding
+        # a complex Kivy widget tree every time the user opens PLAN or another tab.
+        self.content = ScreenManager(transition=NoTransition())
         self.root_box.add_widget(self.content)
 
-        self.screens = {"map": self._build_map(), "plan": self._build_plan(),
-                        "atc": self._build_atc(), "tools": self._build_tools(),
-                        "link": self._build_link()}
+        builders = {"map": self._build_map, "plan": self._build_plan,
+                    "atc": self._build_atc, "tools": self._build_tools,
+                    "link": self._build_link}
+        self.screens = {}
+        for mode, builder in builders.items():
+            screen = Screen(name=mode)
+            try:
+                view = builder()
+            except Exception as exc:
+                view = self._screen_error_view(mode, exc)
+            screen.add_widget(view)
+            self.screens[mode] = screen
+            self.content.add_widget(screen)
 
         nav = BoxLayout(size_hint_y=None, height=dp(56), spacing=dp(2), padding=(dp(6), dp(4)))
         for label, mode in (("GLOBE", "map"), ("PLAN", "plan"), ("ATC", "atc"), ("TOOLS", "tools"), ("LINK", "link")):
@@ -548,9 +572,45 @@ class AeroflyATCApp(App):
         return self.root_box
 
     def show_screen(self, mode):
-        self.screen_mode = mode
-        self.content.clear_widgets()
-        self.content.add_widget(self.screens[mode])
+        if mode not in self.screens:
+            return
+        try:
+            self.screen_mode = mode
+            self.content.current = mode
+        except Exception as exc:
+            self._report_ui_error("opening tab: " + mode, exc)
+
+    def _screen_error_view(self, mode, exc):
+        message = "%s tab could not initialize: %s" % (mode.upper(), str(exc)[:180])
+        self._write_ui_error(message, traceback.format_exc())
+        box = BoxLayout(orientation="vertical", padding=dp(18), spacing=dp(10))
+        box.add_widget(self._label("SCREEN ERROR", "16sp", AMBER, True))
+        box.add_widget(self._label(message, "12sp", TEXT))
+        box.add_widget(self._label("Diagnostic saved to ui_errors.log. Other tabs remain available.", "10sp", MUTED))
+        return box
+
+    def _write_ui_error(self, message, details):
+        try:
+            path = os.path.join(self.user_data_dir, "ui_errors.log")
+            with open(path, "a", encoding="utf-8") as handle:
+                handle.write("\n--- %s ---\n%s\n%s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), message, details))
+        except Exception:
+            pass
+
+    def _report_ui_error(self, context, exc):
+        details = traceback.format_exc()
+        message = "%s: %s" % (context, str(exc)[:180])
+        self._write_ui_error(message, details)
+        if getattr(self, "screen_mode", "") == "plan" and hasattr(self, "plan_out"):
+            try:
+                self.plan_out.text = "ACTION FAILED\n" + message + "\nDetails saved to ui_errors.log."
+            except Exception:
+                pass
+        if hasattr(self, "status"):
+            try:
+                self.status.text = "UI error logged: " + message
+            except Exception:
+                pass
 
     # ---------- GLOBE ----------
     def _build_map(self):
@@ -589,10 +649,11 @@ class AeroflyATCApp(App):
         box.add_widget(self._row(self.in_orig, self.in_dest))
         box.add_widget(self._row(self.in_ac, self.in_fl))
         box.add_widget(self.in_sb)
-        box.add_widget(self._row(self._button("GENERATE", self.generate_plan),
-                                 self._button("WEATHER", self.fetch_weather, PANEL),
-                                 self._button("SIMBRIEF", self.import_simbrief, PANEL),
-                                 self._button("GPX", self.copy_gpx, PANEL)))
+        box.add_widget(self._row(self._button("GENERATE PLAN", self.generate_plan),
+                                 self._button("WEATHER  METAR/TAF", self.fetch_weather, PANEL)))
+        box.add_widget(self._row(self._button("IMPORT SIMBRIEF", self.import_simbrief, PANEL),
+                                 self._button("EXPORT GPX", self.copy_gpx, PANEL),
+                                 self._button("OPEN CHARTS", self.open_charts, PANEL)))
         self.profile = ProfileView(size_hint_y=None, height=dp(110))
         box.add_widget(self.profile)
         sv, self.plan_out = self._scroll_label(size="11sp")
@@ -625,22 +686,52 @@ class AeroflyATCApp(App):
         if not codes:
             self.plan_out.text = "Enter departure and/or arrival first."
             return
-        self.plan_out.text = "Fetching METAR..."
+        self.plan_out.text = "Fetching METAR and TAF..."
 
         def work():
             lines = []
             for code in codes:
+                parts = [code]
                 try:
                     raw = pc.fetch_metar(code)
                     if raw:
                         self.metars[code] = raw
-                        lines.append(raw)
+                        parts.append("METAR\n" + raw)
                     else:
-                        lines.append(code + ": no METAR returned")
+                        parts.append("METAR: no report returned")
                 except Exception as e:
-                    lines.append("%s: weather fetch failed (%s)" % (code, str(e)[:60]))
+                    parts.append("METAR failed (%s)" % str(e)[:70])
+                try:
+                    taf = pc.fetch_taf(code)
+                    if taf:
+                        self.tafs[code] = taf
+                        parts.append("TAF\n" + taf)
+                    else:
+                        parts.append("TAF: no forecast returned")
+                except Exception as e:
+                    parts.append("TAF failed (%s)" % str(e)[:70])
+                lines.append("\n".join(parts))
             self._set_plan_text("\n\n".join(lines))
         threading.Thread(target=work, daemon=True).start()
+
+    def open_charts(self, *_):
+        """Open the official chart service; chart datasets remain provider licensed."""
+        url = "https://charts.navigraph.com/"
+        try:
+            from jnius import autoclass
+            Intent = autoclass("android.content.Intent")
+            Uri = autoclass("android.net.Uri")
+            Activity = autoclass("org.kivy.android.PythonActivity")
+            intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+            Activity.mActivity.startActivity(intent)
+            self.plan_out.text = "Opened official Navigraph Charts. Provider account and chart entitlements may be required."
+        except Exception:
+            try:
+                webbrowser.open(url)
+            except Exception:
+                pass
+            self.plan_out.text = ("Use the official chart portal in your browser: " + url +
+                                  "\nThis app does not bundle or copy licensed Jeppesen/Navigraph charts.")
 
     def import_simbrief(self, *_):
         user = self.in_sb.text.strip()

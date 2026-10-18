@@ -33,6 +33,21 @@ def test_metar():
     q = pc.decode_metar("EGLL 011250Z 27012KT 9999 M02/M05 Q1021")
     assert q["qnh_hpa"] == 1021 and q["temp_c"] == -2 and q["vis"] == "10 KM"
 
+def test_taf_fetch():
+    from unittest.mock import patch
+
+    class FakeResponse:
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+        def read(self): return b"TAF HUEN 181100Z 1812/1912 12008KT 9999 SCT020"
+
+    with patch("planner_core.urllib.request.urlopen", return_value=FakeResponse()) as opened:
+        raw = pc.fetch_taf("HUEN")
+    assert raw.startswith("TAF HUEN"), raw
+    request = opened.call_args.args[0]
+    assert "taf?ids=HUEN&format=raw" in request.full_url, request.full_url
+
+
 def test_gpx():
     g = pc.export_gpx("T", [("KJFK", 40.6, -73.7), ("EGLL", 51.4, -0.4)])
     assert g.count("<rtept") == 2 and "KJFK" in g

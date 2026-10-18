@@ -68,6 +68,9 @@ jobs:
           print('All Python sources compile successfully.')
           PY
 
+      - name: Run planner and ATC regression tests
+        run: python tests/test_core.py
+
       - name: Generate app icon
         run: python make_icon.py
 

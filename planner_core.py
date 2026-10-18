@@ -169,6 +169,18 @@ def fetch_metar(icao, timeout=10):
     return text.splitlines()[0].strip() if text else ""
 
 
+def fetch_taf(icao, timeout=10):
+    """Fetch raw TAF forecast text from AviationWeather.gov."""
+    code = (icao or "").strip().upper()
+    if not code or not re.fullmatch(r"[A-Z0-9]{3,4}", code):
+        raise ValueError("Enter a valid 3- or 4-character airport identifier.")
+    url = "https://aviationweather.gov/api/data/taf?ids=" + urllib.parse.quote(code) + "&format=raw"
+    req = urllib.request.Request(url, headers={"User-Agent": "AeroflyATC/4.1 (flight simulator companion)"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        text = resp.read().decode("utf-8", "replace").strip()
+    return text.splitlines()[0].strip() if text else ""
+
+
 def decode_metar(raw):
     """Pull out the fields ATC needs. Missing fields come back as None."""
     out = {"raw": raw, "wind_dir": None, "wind_kt": None, "gust_kt": None,
