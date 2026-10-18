@@ -68,6 +68,9 @@ jobs:
           print('All Python sources compile successfully.')
           PY
 
+      - name: Generate app icon
+        run: python make_icon.py
+
       - name: Build debug APK
         env:
           BUILDOZER_WARN_ON_ROOT: "0"
