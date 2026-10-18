@@ -1,0 +1,63 @@
+name: Restore exact Claude v4 source
+on:
+  push:
+    branches: [claude-v4-restore]
+permissions:
+  contents: write
+jobs:
+  restore:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout payload branch
+        uses: actions/checkout@v4
+        with:
+          ref: claude-v4-restore
+      - name: Checkout main target
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}
+          ref: main
+          path: mainrepo
+          token: ${{ github.token }}
+      - name: Restore and verify the 11 exact PDF files
+        run: |
+          python - <<'PY'
+          import base64, hashlib, json, pathlib, zlib
+          payload_text = ''.join(p.read_text(encoding='ascii') for p in sorted(pathlib.Path('.restore-v4').glob('payload-*.txt')))
+          payload = json.loads(payload_text)
+          manifest = {
+            'main.py': (40461, '71a3a592b280d4ed12623a566fe0b57c4a399c8cefc3008dcd0b2d8820400e63'),
+            'atc_engine.py': (14190, '8cf254522dc5a0a11ff5936dbd40d442a8b9af6ba14fc9452583507f944bf849'),
+            'planner_core.py': (11234, '04062c4030cd5906ca51684ce6ee3fc0220d46ecbbb4781ece90762cb2f65600'),
+            'extras.py': (5906, 'd4d63c9430a4ecca894c07e156629a35503e6a35e0cfa3738bba00f4875ae8ac'),
+            'voice.py': (3268, '6653085267326aec64743a5d9cf36623d073d4d1f8f5ab95d40e4be2b1342444'),
+            'make_icon.py': (8241, 'b57774fe320538b7d7f2ec0dff2af51d46c7103cace537ead8edb3bd0193a215'),
+            'buildozer.spec': (661, 'a4cd696862ef0759e5cb080b3a355961c9cf64bdb6372d8e16eced0970468038'),
+            'README.md': (1805, '60e435cee1e2b7e0124d971152e36e7ac2c655ff9116d2ebb5e7e5ae6da29ef6'),
+            '.github/workflows/android.yml': (4639, 'a6d30fa987a13de3ec044f5d1461190918455b2bf65a51dbfa36171094f9dbca'),
+            'tests/test_core.py': (5848, '8daa487224366c8cb2bdecbdeeb6c84108cb299134025e25270b11243025f8a7'),
+            'tools/protocol_probe.py': (2216, '2fe8c352124962173511da1910a99305480d120f097649b9fa39e8a6fd0ea295'),
+          }
+          assert set(payload) == set(manifest), f'File set mismatch: {set(payload) ^ set(manifest)}'
+          root = pathlib.Path('mainrepo')
+          for name, (expected_size, expected_sha) in manifest.items():
+              raw = zlib.decompress(base64.b64decode(payload[name]))
+              actual_sha = hashlib.sha256(raw).hexdigest()
+              assert len(raw) == expected_size, f'{name}: byte count {len(raw)} != {expected_size}'
+              assert actual_sha == expected_sha, f'{name}: SHA-256 mismatch: {actual_sha}'
+              dest = root / name
+              dest.parent.mkdir(parents=True, exist_ok=True)
+              dest.write_bytes(raw)
+              print(f'VERIFIED {name}: {len(raw)} bytes SHA256 {actual_sha}')
+          print('ALL 11 SOURCE FILES VERIFIED AGAINST THE PDF MANIFEST')
+          PY
+      - name: Commit exact specification files to main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          git -C mainrepo config user.name "github-actions[bot]"
+          git -C mainrepo config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C mainrepo add main.py atc_engine.py planner_core.py extras.py voice.py make_icon.py buildozer.spec README.md .github/workflows/android.yml tests/test_core.py tools/protocol_probe.py
+          git -C mainrepo commit -m "AeroflyATC v4: planner, ATC engine, tools, icon, connection fixes"
+          git -C mainrepo push origin HEAD:main
