@@ -54,12 +54,30 @@ class OSMMap(Widget):
         self.tiles = {}
         self.pending = set()
         self._touch = None
+        self._touch_start = None
+        self._touch_prev = None
+        self._touch_moved = False
+        self.tap_callback = None
+        self.pan_callback = None
+        self.base_layer = "chart"
         self.bind(pos=self.redraw, size=self.redraw)
         Clock.schedule_once(lambda *_: self.load_tiles(), 0.5)
-    def set_fix(self, lat, lon, heading):
+    def set_fix(self, lat, lon, heading, follow=True):
         if not (-90 <= lat <= 90 and -180 <= lon <= 180): return
+        was_fixed = self.has_fix
         self.lat, self.lon, self.heading, self.has_fix = lat, lon, heading, True
-        self.center_lat, self.center_lon = lat, lon
+        if (not was_fixed) or follow:
+            moved = abs(self.center_lat - lat) > 0.008 or abs(self.center_lon - lon) > 0.008
+            self.center_lat, self.center_lon = lat, lon
+            if moved or not was_fixed:
+                self.load_tiles()
+        self.redraw()
+    def set_layer(self, layer):
+        layer = layer if layer in ("chart", "terrain", "satellite") else "chart"
+        if layer == self.base_layer: return
+        self.base_layer = layer
+        self.tiles = {}
+        self.pending = set()
         self.load_tiles()
         self.redraw()
     def world(self, lat, lon):
@@ -86,14 +104,21 @@ class OSMMap(Widget):
                 tx, ty = int(self.origin[0] + ix), int(self.origin[1] + iy)
                 tx %= n
                 if ty < 0 or ty >= n: continue
-                key = (self.zoom, tx, ty)
+                key = (self.base_layer, self.zoom, tx, ty)
                 if key in self.tiles or key in self.pending: continue
                 self.pending.add(key)
-                url = "https://tile.openstreetmap.org/%d/%d/%d.png" % key
+                layer, z, x, y = key
+                if layer == "satellite":
+                    url = "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/%d/%d/%d" % (z, y, x)
+                elif layer == "terrain":
+                    shard = ("a", "b", "c")[(x + y) % 3]
+                    url = "https://%s.tile.opentopomap.org/%d/%d/%d.png" % (shard, z, x, y)
+                else:
+                    url = "https://tile.openstreetmap.org/%d/%d/%d.png" % (z, x, y)
                 UrlRequest(url, on_success=lambda req, result, k=key: self.tile_ok(k, result),
                            on_failure=lambda req, err, k=key: self.tile_fail(k),
                            on_error=lambda req, err, k=key: self.tile_fail(k),
-                           req_headers={"User-Agent":"AeroflyATC-Android/0.1 (OSM map test)"}, timeout=12)
+                           req_headers={"User-Agent":"AeroflyATC-Android/1.0 (map and flight planning)"}, timeout=12)
     def tile_ok(self, key, data):
         self.pending.discard(key)
         try: self.tiles[key] = CoreImage(BytesIO(data), ext="png").texture
@@ -113,8 +138,8 @@ class OSMMap(Widget):
             left, bottom = cx - self.width/(2*size), cy - self.height/(2*size)
             n = 2 ** self.zoom
             for key, tex in list(self.tiles.items()):
-                z, tx, ty = key
-                if z != self.zoom: continue
+                layer, z, tx, ty = key
+                if layer != self.base_layer or z != self.zoom: continue
                 dx = (tx - cx + n/2) % n - n/2
                 x = self.center_x + dx*size
                 y = self.center_y + (cy - ty)*size
@@ -130,18 +155,46 @@ class OSMMap(Widget):
                 Line(points=[x,y,x+math.sin(h)*dp(24),y+math.cos(h)*dp(24)],width=dp(2))
     def on_touch_down(self, touch):
         if self.collide_point(*touch.pos):
-            self._touch = touch.pos; return True
+            self._touch = touch.pos
+            self._touch_start = touch.pos
+            self._touch_prev = touch.pos
+            self._touch_moved = False
+            return True
         return super().on_touch_down(touch)
     def on_touch_move(self, touch):
-        if self._touch:
-            ox,oy=self._touch
-            self.center_lon -= (touch.x-ox)/max(1,self.width)*360/(2**self.zoom)
-            self.center_lat += (touch.y-oy)/max(1,self.height)*120/(2**self.zoom)
-            self.center_lat=max(-85,min(85,self.center_lat))
-            self._touch=touch.pos; self.load_tiles(); self.redraw(); return True
+        if self._touch is not None:
+            px, py = self._touch_prev
+            sx, sy = self._touch_start
+            dx_total, dy_total = touch.x - sx, touch.y - sy
+            if math.hypot(dx_total, dy_total) > dp(8) and not self._touch_moved:
+                self._touch_moved = True
+                if callable(self.pan_callback):
+                    self.pan_callback()
+            dx, dy = touch.x - px, touch.y - py
+            size = dp(256)
+            cx, cy = self.world(self.center_lat, self.center_lon)
+            lat1, lon1 = self.geo(cx - dx / size, cy + dy / size)
+            self.center_lat = max(-85, min(85, lat1))
+            self.center_lon = ((lon1 + 180) % 360) - 180
+            self._touch_prev = touch.pos
+            self._touch = touch.pos
+            self.load_tiles()
+            self.redraw()
+            return True
         return super().on_touch_move(touch)
-    def on_touch_up(self,touch):
-        if self._touch: self._touch=None; return True
+    def on_touch_up(self, touch):
+        if self._touch is not None:
+            start = self._touch_start
+            if not self._touch_moved and start is not None and callable(self.tap_callback):
+                cx, cy = self.world(self.center_lat, self.center_lon)
+                lat, lon = self.geo(cx + (touch.x - self.center_x) / dp(256),
+                                    cy - (touch.y - self.center_y) / dp(256))
+                self.tap_callback(lat, lon)
+            self._touch = None
+            self._touch_start = None
+            self._touch_prev = None
+            self._touch_moved = False
+            return True
         return super().on_touch_up(touch)
 
 class Telemetry:
@@ -243,57 +296,31 @@ class Telemetry:
         return d
 
 class AeroflyATCApp(App):
-    title="Aerofly ATC — Telemetry Test"
+    title = "Aerofly ATC"
+
     def build(self):
-        self.telemetry=Telemetry()
-        root=FloatLayout()
-        with root.canvas.before:
-            Color(*BG); self.bg=Rectangle(pos=root.pos,size=root.size)
-        root.bind(pos=lambda w,*_:setattr(self.bg,"pos",w.pos),size=lambda w,*_:setattr(self.bg,"size",w.size))
-        col=BoxLayout(orientation="vertical",padding=dp(12),spacing=dp(10))
-        root.add_widget(col)
-        header=GlassPanel(orientation="horizontal",size_hint_y=None,height=dp(56),padding=dp(12),spacing=dp(8))
-        header.add_widget(Label(text="[b]AEROFLY[/b]  /  TELEMETRY LINK",markup=True,color=INK,font_size="15sp",halign="left"))
-        self.state=Label(text="WAITING",color=AMBER,bold=True,size_hint_x=None,width=dp(88))
-        header.add_widget(self.state); col.add_widget(header)
-        self.map=OSMMap()
-        col.add_widget(self.map)
-        panel=GlassPanel(orientation="vertical",size_hint_y=None,height=dp(210),padding=dp(12),spacing=dp(7))
-        row=BoxLayout(size_hint_y=None,height=dp(42),spacing=dp(7))
-        self.ip=TextInput(hint_text="Simulator IPv4 address",text="",multiline=False,
-            foreground_color=INK,hint_text_color=MUTED,cursor_color=CYAN,
-            background_normal="",background_active="",background_color=(0.04,0.08,0.12,0.92),
-            padding=(dp(10),dp(10)))
-        row.add_widget(self.ip)
-        btn=Button(text="CONNECT",size_hint_x=None,width=dp(110),background_normal="",
-            background_down="",background_color=(0.05,0.38,0.43,1),color=INK,bold=True)
-        btn.bind(on_release=self.connect); row.add_widget(btn); panel.add_widget(row)
-        self.metrics=Label(text="LAT --   LON --   ALT -- ft   GS -- kt   HDG ---",color=CYAN,
-            font_size="11sp",size_hint_y=None,height=dp(25),halign="left")
-        panel.add_widget(self.metrics)
-        self.status=Label(text="TCP 58585  •  UDP 49002 / 40092",color=MUTED,font_size="10sp",
-            halign="left",valign="top")
-        panel.add_widget(self.status); col.add_widget(panel)
-        foot=Label(text="OpenStreetMap © contributors  •  Drag map to pan",color=MUTED,
-                   size_hint_y=None,height=dp(20),font_size="10sp")
-        col.add_widget(foot)
+        self.telemetry = Telemetry()
+        self.follow_map = True
+        self.map = OSMMap()
+        from reference_ui import ReferenceUI
+        self.reference_ui = ReferenceUI(self)
         self.telemetry.start()
-        Clock.schedule_interval(self.refresh,0.5)
-        Clock.schedule_once(lambda *_: self.map.load_tiles(),1)
-        return root
-    def connect(self,*_):
-        self.telemetry.host=self.ip.text.strip()
-        with self.telemetry.lock:self.telemetry.data["message"]="Connecting to %s:58585; UDP listeners active"%self.telemetry.host
-    def refresh(self,*_):
-        d=self.telemetry.snapshot()
-        self.state.text="CONNECTED" if d["connected"] else "WAITING"
-        self.state.color=GREEN if d["connected"] else AMBER
-        self.status.text=d["message"]+"\n"+d["transport"]+"  •  packets "+str(d["packets"])
-        if d["lat"] is not None and d["lon"] is not None:
-            self.map.set_fix(d["lat"],d["lon"],d["heading"])
-            self.metrics.text="LAT %.5f   LON %.5f   ALT %.0f ft   GS %.0f kt   HDG %03.0f"%(d["lat"],d["lon"],d["alt"],d["speed"],d["heading"])
+        Clock.schedule_interval(self.refresh, 0.5)
+        Clock.schedule_once(lambda *_: self.map.load_tiles(), 1.0)
+        return self.reference_ui.root
+
+    def refresh(self, *_):
+        data = self.telemetry.snapshot()
+        if data.get("lat") is not None and data.get("lon") is not None:
+            self.map.set_fix(data["lat"], data["lon"], data.get("heading", 0),
+                             follow=self.follow_map)
+        if hasattr(self, "reference_ui"):
+            self.reference_ui.refresh_telemetry(data)
+
     def on_stop(self):
-        if hasattr(self,"telemetry"):self.telemetry.stop()
+        if hasattr(self, "telemetry"):
+            self.telemetry.stop()
+
 
 if __name__=="__main__":
     AeroflyATCApp().run()
