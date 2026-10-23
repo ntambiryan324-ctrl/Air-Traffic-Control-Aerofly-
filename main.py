@@ -5,6 +5,7 @@ import re
 import socket
 import threading
 import time
+import traceback
 from io import BytesIO
 
 from kivy.app import App
@@ -302,12 +303,62 @@ class AeroflyATCApp(App):
         self.telemetry = Telemetry()
         self.follow_map = True
         self.map = OSMMap()
-        from reference_ui import ReferenceUI
-        self.reference_ui = ReferenceUI(self)
         self.telemetry.start()
         Clock.schedule_interval(self.refresh, 0.5)
         Clock.schedule_once(lambda *_: self.map.load_tiles(), 1.0)
-        return self.reference_ui.root
+        try:
+            from reference_ui import ReferenceUI
+            self.reference_ui = ReferenceUI(self)
+            return self.reference_ui.root
+        except Exception:
+            # Never let a UI-construction exception terminate the whole Android app.
+            # Keep a visible diagnostic screen so the exact Python traceback can be recovered.
+            self.startup_error = traceback.format_exc()
+            try:
+                os.makedirs(self.user_data_dir, exist_ok=True)
+                with open(os.path.join(self.user_data_dir, "startup_error.log"), "w", encoding="utf-8") as fp:
+                    fp.write(self.startup_error)
+            except Exception:
+                pass
+            self.fallback_root = BoxLayout(orientation="vertical", padding=dp(20), spacing=dp(12))
+            with self.fallback_root.canvas.before:
+                Color(*BG)
+                self._fallback_bg = Rectangle(pos=self.fallback_root.pos, size=self.fallback_root.size)
+            self.fallback_root.bind(pos=lambda w, *_: setattr(self._fallback_bg, "pos", w.pos),
+                                    size=lambda w, *_: setattr(self._fallback_bg, "size", w.size))
+            self.fallback_root.add_widget(Label(text="AER OFLY ATC · STARTUP RECOVERY",
+                                                size_hint_y=None, height=dp(54), color=CYAN,
+                                                font_size="20sp", bold=True))
+            self.fallback_message = Label(
+                text="The main interface could not initialize. Telemetry listeners are running.\n\n"
+                     + self.startup_error[-3500:],
+                color=INK, font_size="11sp", halign="left", valign="top")
+            self.fallback_message.bind(size=lambda w, *_: setattr(w, "text_size", (w.width, None)))
+            self.fallback_root.add_widget(self.fallback_message)
+            retry = Button(text="RETRY INTERFACE", size_hint_y=None, height=dp(50))
+            retry.bind(on_release=lambda *_: self.retry_interface())
+            self.fallback_root.add_widget(retry)
+            return self.fallback_root
+
+    def retry_interface(self):
+        try:
+            if getattr(self.map, "parent", None) is not None:
+                self.map.parent.remove_widget(self.map)
+            from reference_ui import ReferenceUI
+            ui = ReferenceUI(self)
+            self.reference_ui = ui
+            self.root.clear_widgets()
+            self.root.add_widget(ui.root)
+            return True
+        except Exception:
+            self.startup_error = traceback.format_exc()
+            try:
+                with open(os.path.join(self.user_data_dir, "startup_error.log"), "w", encoding="utf-8") as fp:
+                    fp.write(self.startup_error)
+            except Exception:
+                pass
+            self.fallback_message.text = "Interface initialization failed again.\n\n" + self.startup_error[-3500:]
+            return False
 
     def refresh(self, *_):
         data = self.telemetry.snapshot()
