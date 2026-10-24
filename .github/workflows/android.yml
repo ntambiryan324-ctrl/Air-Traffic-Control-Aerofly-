@@ -123,7 +123,7 @@ jobs:
           # python-for-android currently imports pip's internal open_rich_spinner,
           # which was removed in newer pip releases. Pin the toolchain's pip and
           # propagate a constraint into the isolated python-for-android venv.
-          printf 'pip==24.3.1\\n' > ci-constraints.txt
+          printf 'pip==24.3.1\n' > ci-constraints.txt
           export PIP_CONSTRAINT="$GITHUB_WORKSPACE/ci-constraints.txt"
           export PIP_NO_INPUT=1
           # buildozer.spec must permanently include the ARM64 device ABI and
