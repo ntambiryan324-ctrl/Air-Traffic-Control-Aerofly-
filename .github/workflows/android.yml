@@ -83,7 +83,17 @@ jobs:
           rm -rf .buildozer bin build.log
           # Produce the shipping ARM64 APK and an x86_64 twin for an emulator launch test.
           sed -i 's/^android.archs = arm64-v8a$/android.archs = arm64-v8a,x86_64/' buildozer.spec
-          grep -q '^android.archs = arm64-v8a,x86_64
+          python - <<'PY'
+          from pathlib import Path
+          path = Path("buildozer.spec")
+          text = path.read_text(encoding="utf-8")
+          old = "android.archs = arm64-v8a"
+          new = "android.archs = arm64-v8a,x86_64"
+          assert old in text, "Expected ARM64 architecture setting not found"
+          path.write_text(text.replace(old, new, 1), encoding="utf-8")
+          assert new in path.read_text(encoding="utf-8")
+          PY
+          buildozer -v --debug android debug 2>&1 | tee build.log
 
       - name: Diagnose generated packages
         if: always()
