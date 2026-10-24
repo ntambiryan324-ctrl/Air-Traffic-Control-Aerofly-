@@ -18,7 +18,8 @@ android.archs = arm64-v8a,x86_64
 android.permissions = INTERNET,ACCESS_NETWORK_STATE
 android.accept_sdk_license = True
 android.private_storage = True
-p4a.branch = master
+p4a.branch = develop
+p4a.commit = d2ee8c5
 p4a.local_recipes = p4a-recipes
 
 [buildozer]
