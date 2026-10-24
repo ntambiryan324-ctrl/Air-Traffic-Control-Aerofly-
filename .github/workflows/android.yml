@@ -119,24 +119,8 @@ jobs:
         run: |
           set -o pipefail
           rm -rf .buildozer bin build.log
-          python - <<'PY'
-          from pathlib import Path
-          p = Path("buildozer.spec")
-          text = p.read_text(encoding="utf-8")
-          old = "android.archs = arm64-v8a"
-          new = "android.archs = arm64-v8a,x86_64"
-          if old not in text:
-              raise SystemExit("Expected android.archs = arm64-v8a in buildozer.spec")
-          text = text.replace(old, new, 1)
-          p.write_text(text, encoding="utf-8")
-          print("Configured ARM64 shipping APK plus x86_64 emulator-test APK.")
-          PY
-          python - <<'PY'
-          from pathlib import Path
-          lines = Path("buildozer.spec").read_text(encoding="utf-8").splitlines()
-          assert any(line.strip() == "android.archs = arm64-v8a,x86_64" for line in lines), "dual architecture setting was not written correctly"
-          print("Dual architecture setting verified.")
-          PY
+          sed -i -E 's/^android\\.archs[[:space:]]*=.*/android.archs = arm64-v8a,x86_64/' buildozer.spec
+          grep -q '^android.archs = arm64-v8a,x86_64$' buildozer.spec
           buildozer -v --debug android debug 2>&1 | tee build.log
 
       - name: Diagnose generated packages
