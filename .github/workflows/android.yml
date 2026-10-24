@@ -102,10 +102,14 @@ jobs:
           test -s icon.png
           file icon.png
           python - <<'PY'
-          from PIL import Image
-          im = Image.open("icon.png")
-          im.verify()
-          print("Icon image verified:", im.format, im.size)
+          from pathlib import Path
+          data = Path("icon.png").read_bytes()
+          assert data[:8] == bytes.fromhex("89504e470d0a1a0a"), "icon.png is not a PNG"
+          assert len(data) >= 24, "icon.png is truncated"
+          width = int.from_bytes(data[16:20], "big")
+          height = int.from_bytes(data[20:24], "big")
+          assert width >= 128 and height >= 128, f"Icon size too small: {width}x{height}"
+          print(f"PNG icon verified: {width}x{height}, {len(data)} bytes")
           PY
 
       - name: Build debug APKs for device and emulator
