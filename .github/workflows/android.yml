@@ -131,7 +131,12 @@ jobs:
           p.write_text(text, encoding="utf-8")
           print("Configured ARM64 shipping APK plus x86_64 emulator-test APK.")
           PY
-          grep -q '^android.archs = arm64-v8a,x86_64$' buildozer.spec
+          python - <<'PY'
+          from pathlib import Path
+          lines = Path("buildozer.spec").read_text(encoding="utf-8").splitlines()
+          assert any(line.strip() == "android.archs = arm64-v8a,x86_64" for line in lines), "dual architecture setting was not written correctly"
+          print("Dual architecture setting verified.")
+          PY
           buildozer -v --debug android debug 2>&1 | tee build.log
 
       - name: Diagnose generated packages
