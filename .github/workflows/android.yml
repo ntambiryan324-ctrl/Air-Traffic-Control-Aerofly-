@@ -36,8 +36,9 @@ jobs:
 
       - name: Install known-good Buildozer toolchain
         run: |
-          python -m pip install --upgrade pip
+          python -m pip install "pip==24.3.1"
           python -m pip install "buildozer==1.5.0" "cython==0.29.34" "setuptools<81" wheel virtualenv "kivy==2.3.1" pillow
+          python -m pip --version
           buildozer --version
           python -c "import Cython; print('Cython', Cython.__version__)"
 
@@ -119,6 +120,12 @@ jobs:
         run: |
           set -euo pipefail
           rm -rf .buildozer bin build.log
+          # python-for-android currently imports pip's internal open_rich_spinner,
+          # which was removed in newer pip releases. Pin the toolchain's pip and
+          # propagate a constraint into the isolated python-for-android venv.
+          printf 'pip==24.3.1\\n' > ci-constraints.txt
+          export PIP_CONSTRAINT="$GITHUB_WORKSPACE/ci-constraints.txt"
+          export PIP_NO_INPUT=1
           # buildozer.spec must permanently include the ARM64 device ABI and
           # x86_64 emulator ABI. Do not rewrite it here: that duplicated the
           # architecture when the spec was already correctly configured.
