@@ -17,8 +17,8 @@ Android companion for Aerofly FS Global (Kivy). Simulation use only, not for rea
 
 ## Connect
 Two methods, both listed on the LINK tab:
-- **A (same as FSWidgets, TCP 58585):** Aerofly > Settings > Miscellaneous > ON 'Send flight data to FSWidgets Apps'. Enter the IPv4 address of the device running Aerofly and tap CONNECT. The app waits for data and sends a single probe request only if the sim stays silent.
-- **B (UDP 49002):** Aerofly > Miscellaneous > ON 'Broadcast flight info to IP address', set 'Broadcast IP address' to the device running this app and port to 49002.
+- **A (FSWidgets-compatible TCP 58585):** In Aerofly FS Global, enable Settings > Miscellaneous > 'Send flight data to FSWidgets Apps'. Enter the simulator device's IPv4 address and tap CONNECT. The client sends the HTTP-like stream request used by the mobile endpoint, retries connections, and parses line-framed or concatenated XGPS/XATT records.
+- **B (UDP):** If your simulator exposes broadcast telemetry, set its destination IP to this device and use UDP port 49002 (the app also listens on 40092).
 If Aerofly runs on the same device, use split-screen or a floating window so Android keeps this app's network alive.
 
 ## Files

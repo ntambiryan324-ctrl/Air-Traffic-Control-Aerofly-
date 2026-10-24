@@ -218,6 +218,70 @@ class Telemetry:
         try:
             if self.sock: self.sock.close()
         except OSError: pass
+
+    def reconnect(self, host):
+        host = (host or "").strip()
+        with self.lock:
+            self.host = host
+            self.data["connected"] = False
+            self.data["message"] = (
+                "Connecting to %s:58585 and requesting telemetry" % host
+                if host else "Enter simulator IP and tap CONNECT"
+            )
+        sock = self.sock
+        if sock is not None:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+    @staticmethod
+    def _request_stream(sock):
+        # Aerofly FS Global's mobile FSWidgets endpoint expects a client request.
+        sock.sendall(b"GET / HTTP/1.1\r\n\r\n")
+
+    def _parse_tcp_segment(self, segment, source):
+        if not segment:
+            return
+        text = segment.decode("utf-8", "replace") if isinstance(segment, bytes) else str(segment)
+        starts = [match.start() for match in re.finditer(r"(?=XGPS|XATT)", text)]
+        for index, start in enumerate(starts):
+            end = starts[index + 1] if index + 1 < len(starts) else len(text)
+            record = text[start:end].strip()
+            if record:
+                self.parse(record, "TCP 58585", source)
+
+    def _consume_tcp_buffer(self, buffer, chunk, source):
+        data = (buffer or b"") + chunk
+        # First consume line-framed records and discard unrelated HTTP headers.
+        while True:
+            match = re.search(rb"[\r\n]", data)
+            if match is None:
+                break
+            self._parse_tcp_segment(data[:match.start()], source)
+            data = data[match.end():]
+        # Some simulator builds concatenate XGPS and XATT records without newlines.
+        starts = [match.start() for match in re.finditer(rb"(?=XGPS|XATT)", data)]
+        if len(starts) > 1:
+            for index in range(len(starts) - 1):
+                self._parse_tcp_segment(data[starts[index]:starts[index + 1]], source)
+            data = data[starts[-1]:]
+        # A whitespace-terminated trailing record is complete even without CR/LF.
+        if data.startswith((b"XGPS", b"XATT")) and data[-1:] in (b" ", b"\t"):
+            needed = 5 if data.startswith(b"XGPS") else 3
+            if data.count(b",") >= needed:
+                self._parse_tcp_segment(data, source)
+                data = b""
+        # Protect against a corrupt/non-framed stream growing forever.
+        if len(data) > 8192:
+            starts = [match.start() for match in re.finditer(rb"(?=XGPS|XATT)", data)]
+            data = data[starts[-1]:] if starts else b""
+        return data
+
     def parse(self, raw, transport, source):
         txt=raw.decode("utf-8","replace") if isinstance(raw,bytes) else str(raw)
         for line in re.split(r"[\r\n]+",txt):
@@ -270,17 +334,16 @@ class Telemetry:
             s=None
             try:
                 s=socket.create_connection((host,self.TCP_PORT),timeout=4); s.settimeout(2); self.sock=s
-                with self.lock:self.data["message"]="TCP connected to %s:%d; waiting for FSWidgets data"%(host,self.TCP_PORT)
+                self._request_stream(s)
+                with self.lock:
+                    self.data["connected"] = False
+                    self.data["message"] = "TCP connected to %s:%d; stream request sent, waiting for XGPS/XATT"%(host,self.TCP_PORT)
                 buf=b""
                 while self.running and host==self.host:
                     try:
                         chunk=s.recv(8192)
                         if not chunk:break
-                        buf+=chunk.replace(b"\r",b"\n")
-                        while b"\n" in buf:
-                            line,buf=buf.split(b"\n",1); self.parse(line,"TCP 58585",host)
-                        if buf.startswith((b"XGPS",b"XATT")) and buf.count(b",")>=5:
-                            self.parse(buf,"TCP 58585",host);buf=b""
+                        buf=self._consume_tcp_buffer(buf,chunk,host)
                     except socket.timeout: pass
             except OSError as e:
                 with self.lock:

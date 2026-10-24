@@ -357,6 +357,7 @@ class FlightPlanOverlay(FloatLayout):
              "Airbus A380-800 (A388)", "Cessna 172 (C172)", "Bombardier Dash 8 Q400 (DH8D)"],
             "Airbus A350-1000 XWB (A35K)")
         self.aircraft.text = "Airbus A350-1000 XWB (A35K)"
+        self.aircraft.bind(text=self._configure_speed_for_aircraft)
         airports.add_widget(self._row("Departure", self.origin))
         airports.add_widget(self._row("Arrival", self.destination))
         airports.add_widget(self._row("Aircraft", self.aircraft))
@@ -489,6 +490,30 @@ class FlightPlanOverlay(FloatLayout):
         else:
             self.speed_value = max(100, min(650, self.speed_value + 5 * delta))
         self._update_speed_label()
+        if self.generated:
+            self.recalculate()
+
+    def _configure_speed_for_aircraft(self, value):
+        code = pc.resolve_aircraft(value)
+        if code in ("C172", "BE58", "DH8D"):
+            self.mach_mode = False
+            self.speed_value = float(pc.AIRCRAFT[code][0])
+        else:
+            self.mach_mode = True
+            self.speed_value = 0.84
+        if hasattr(self, "speed_unit"):
+            self.speed_unit.text = "Mach" if self.mach_mode else "TAS"
+        if hasattr(self, "speed_label"):
+            self._update_speed_label()
+
+    def _effective_tas(self):
+        if not self.mach_mode:
+            return float(self.speed_value)
+        # Standard-atmosphere speed of sound, capped at the tropopause.
+        altitude_m = min(11000.0, max(0.0, float(self.cruise_fl) * 100.0 * 0.3048))
+        temperature_k = 288.15 - 0.0065 * altitude_m
+        speed_of_sound_kt = math.sqrt(1.4 * 287.05287 * temperature_k) * 1.943844492
+        return max(40.0, min(700.0, float(self.speed_value) * speed_of_sound_kt))
 
     def _update_speed_label(self):
         self.speed_label.text = ("M %.2f" % self.speed_value) if self.mach_mode else ("%d kt" % self.speed_value)
@@ -594,7 +619,9 @@ class FlightPlanOverlay(FloatLayout):
             points.append((d["lat"], d["lon"]))
         aircraft_text = self.aircraft.text
         aircraft_code = pc.resolve_aircraft(aircraft_text)
-        self.plan = pc.plan_flight(points, aircraft_code, self.cruise_fl)
+        self.plan = pc.plan_flight(points, aircraft_code, self.cruise_fl,
+                                   speed_override_kt=self._effective_tas())
+        self.route_points = list(points)
         self.plan.update({
             "origin": orig, "destination": dest, "origin_name": o["name"], "destination_name": d["name"],
             "route": route or "%s DCT %s" % (orig, dest), "codes": codes,
@@ -749,7 +776,7 @@ class FlightPlanOverlay(FloatLayout):
         self.recalculate()
 
     def _change_speed(self, delta):
-        self.recalculate()
+        self.adjust_speed(delta)
 
     def recalculate(self, *_):
         if not self.generated:
@@ -757,15 +784,25 @@ class FlightPlanOverlay(FloatLayout):
             return
         codes = self.plan.get("codes", [])
         points = self.plan.get("points", [])
-        self.plan = pc.plan_flight(points, pc.resolve_aircraft(self.aircraft.text), self.cruise_fl)
+        previous = dict(self.plan)
+        self.plan = pc.plan_flight(points, pc.resolve_aircraft(self.aircraft.text), self.cruise_fl,
+                                   speed_override_kt=self._effective_tas())
+        self.route_points = list(points)
         self.plan.update({
             "origin": codes[0], "destination": codes[-1],
             "origin_name": self._airport(codes[0])["name"],
             "destination_name": self._airport(codes[-1])["name"],
             "route": getattr(self, "route_result", None).text if hasattr(self, "route_result") else self.route_text,
             "codes": codes, "points": points, "aircraft_name": self.aircraft.text,
-            "payload_pct": self.payload_pct, "nav_cycle": None,
-            "routing_source": "direct/entered route"
+            "payload_pct": self.payload_pct,
+            "sid": previous.get("sid", "Auto"),
+            "star": previous.get("star", "Auto"),
+            "approach": previous.get("approach", "Auto"),
+            "alternate": previous.get("alternate", self.alternate),
+            "departure_runway": previous.get("departure_runway", "AUTO / unresolved locally"),
+            "arrival_runway": previous.get("arrival_runway", "AUTO / unresolved locally"),
+            "nav_cycle": previous.get("nav_cycle"),
+            "routing_source": previous.get("routing_source", "direct/entered route")
         })
         if hasattr(self, "alt_input"):
             self.alternate = self.alt_input.text.strip().upper()
@@ -830,9 +867,7 @@ class FlightPlanOverlay(FloatLayout):
     def _update_result_payload(self, value):
         self.payload_pct = value
         self.plan["payload_pct"] = value
-        self._build_results()
         self.active_tab = "Load"
-        # Keep the Load tab selected after rebuilding.
         self._build_results()
 
     def _profile_tab(self):
@@ -1315,10 +1350,9 @@ class ReferenceUI:
             self.root.remove_widget(self.planner)
 
     def connect(self, *_):
-        self.app.telemetry.host = self.ip.text.strip()
-        with self.app.telemetry.lock:
-            self.app.telemetry.data["message"] = "Connecting to %s:58585; UDP listeners remain active" % self.app.telemetry.host
-        self.telemetry_status.text = "Connecting to %s:58585  ·  UDP 49002 / 40092 active" % self.app.telemetry.host
+        host = self.ip.text.strip()
+        self.app.telemetry.reconnect(host)
+        self.telemetry_status.text = "Connecting to %s:58585  ·  TCP stream request + UDP 49002/40092" % (host or "simulator IP")
 
     def on_map_pan(self):
         self.follow = False

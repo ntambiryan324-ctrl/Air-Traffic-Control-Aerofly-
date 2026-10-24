@@ -97,10 +97,22 @@ def route_distance(points):
     return sum(distance_nm(a[0], a[1], b[0], b[1]) for a, b in zip(points, points[1:]))
 
 
-def plan_flight(points, aircraft="A320", cruise_fl=None, reserve_min=45, contingency=0.05):
-    """Simple three-phase estimate. points = [(lat, lon), ...]. Returns a dict."""
+def plan_flight(points, aircraft="A320", cruise_fl=None, reserve_min=45, contingency=0.05,
+                speed_override_kt=None):
+    """Simple three-phase estimate. points = [(lat, lon), ...]. Returns a dict.
+
+    speed_override_kt optionally replaces the aircraft profile's nominal TAS for
+    this estimate; it must be a finite value between 40 and 700 knots.
+    """
     code = resolve_aircraft(aircraft)
     tas, climb_fpm, desc_fpm, burn, max_fl = AIRCRAFT[code]
+    if speed_override_kt is not None:
+        try:
+            requested_tas = float(speed_override_kt)
+            if math.isfinite(requested_tas) and 40.0 <= requested_tas <= 700.0:
+                tas = requested_tas
+        except (TypeError, ValueError):
+            pass
     dist = route_distance(points)
     fl = int(cruise_fl) if cruise_fl else min(max_fl, 360 if tas > 400 else 100)
     fl = max(20, min(fl, max_fl))

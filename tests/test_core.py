@@ -1,8 +1,9 @@
-"""Run with: python tests/test_core.py (from the repo root). No Kivy needed."""
+"""Run with: python tests/test_core.py (from the repository root)."""
 import os, sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import planner_core as pc
 from atc_engine import ATCEngine, normalize, contains_token
+from main import Telemetry
 
 def test_distance():
     d = pc.distance_nm(40.6398, -73.7789, 51.4700, -0.4543)  # JFK-LHR
@@ -21,9 +22,39 @@ def test_plan_long_and_short():
     prof = pc.vertical_profile(s)
     assert prof[0][1] == 0 and prof[-1][1] == 0
 
+def test_plan_speed_override():
+    points = [(40.6413, -73.7781), (51.4700, -0.4543)]
+    nominal = pc.plan_flight(points, "A320", 360)
+    faster = pc.plan_flight(points, "A320", 360, speed_override_kt=500)
+    assert nominal["tas_kt"] == pc.AIRCRAFT["A320"][0]
+    assert faster["tas_kt"] == 500
+    assert faster["ete_min"] < nominal["ete_min"]
+    ignored = pc.plan_flight(points, "A320", 360, speed_override_kt=9999)
+    assert ignored["tas_kt"] == nominal["tas_kt"]
+
 def test_aircraft_alias():
     assert pc.resolve_aircraft("Airbus A350-1000 XWB") == "A35K"
     assert pc.resolve_aircraft("zzz") == "A320"
+
+def test_tcp_stream_request_and_framing():
+    class FakeSocket:
+        def __init__(self): self.sent = b""
+        def sendall(self, data): self.sent += data
+
+    fake = FakeSocket()
+    Telemetry._request_stream(fake)
+    assert fake.sent == b"GET / HTTP/1.1\r\n\r\n"
+
+    t = Telemetry()
+    chunk = (b"XGPSAerofly FS Global,32.4435,0.0424,1000,90,50 "
+             b"XATTAerofly FS Global,91,0,0 ")
+    remaining = t._consume_tcp_buffer(b"", chunk, "192.168.1.10")
+    d = t.snapshot()
+    assert remaining == b"", remaining
+    assert d["packets"] == 2, d
+    assert abs(d["lon"] - 32.4435) < 1e-5, d
+    assert abs(d["lat"] - 0.0424) < 1e-5, d
+    assert d["heading"] == 91, d
 
 def test_metar():
     m = pc.decode_metar("METAR KJFK 011251Z 24008G15KT 10SM FEW050 20/12 A3010")
