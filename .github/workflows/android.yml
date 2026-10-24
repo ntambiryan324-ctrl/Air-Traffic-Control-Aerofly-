@@ -117,10 +117,16 @@ jobs:
           BUILDOZER_WARN_ON_ROOT: "0"
           PIP_NO_INPUT: "1"
         run: |
-          set -o pipefail
+          set -euo pipefail
           rm -rf .buildozer bin build.log
-          sed -i -E 's/^android\\.archs[[:space:]]*=.*/android.archs = arm64-v8a,x86_64/' buildozer.spec
-          grep -q '^android.archs = arm64-v8a,x86_64$' buildozer.spec
+          # buildozer.spec must permanently include the ARM64 device ABI and
+          # x86_64 emulator ABI. Do not rewrite it here: that duplicated the
+          # architecture when the spec was already correctly configured.
+          grep -q '^android.archs = arm64-v8a,x86_64$' buildozer.spec || {
+            echo "ERROR: buildozer.spec must declare android.archs = arm64-v8a,x86_64"
+            grep '^android.archs' buildozer.spec || true
+            exit 1
+          }
           buildozer -v --debug android debug 2>&1 | tee build.log
 
       - name: Diagnose generated packages
