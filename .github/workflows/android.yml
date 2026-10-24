@@ -41,6 +41,27 @@ jobs:
           buildozer --version
           python -c "import Cython; print('Cython', Cython.__version__)"
 
+      - name: Validate Android build configuration
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import configparser
+          spec = configparser.ConfigParser(interpolation=None)
+          assert spec.read("buildozer.spec"), "buildozer.spec missing"
+          app = spec["app"]
+          assert app.get("title"), "app.title missing"
+          assert app.get("package.name"), "app package.name missing"
+          assert app.get("package.domain"), "app package.domain missing"
+          assert app.get("android.api"), "android.api missing"
+          assert app.get("android.minapi"), "android.minapi missing"
+          assert "kivy" in app.get("requirements", "").lower(), "Kivy requirement missing"
+          assert Path("main.py").is_file(), "main.py missing"
+          assert Path("make_icon.py").is_file(), "make_icon.py missing"
+          assert Path("tests/test_core.py").is_file(), "regression tests missing"
+          print("Build configuration and required files passed.")
+          PY
+
       - name: Runtime startup structure smoke test
         run: |
           python - <<'PY'
@@ -52,16 +73,19 @@ jobs:
           app = classes["AeroflyATCApp"]
           bases = [b.id for b in app.bases if isinstance(b, ast.Name)]
           assert "App" in bases, f"AeroflyATCApp must inherit App, got {bases}"
-          assert any(isinstance(n, ast.FunctionDef) and n.name == "build" for n in app.body), "build() missing"
+          assert any(isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == "build" for n in app.body), "build() missing"
           compile(Path("main.py").read_text(encoding="utf-8"), "main.py", "exec")
           print("Startup structure smoke test passed.")
           PY
 
       - name: Validate every Python source file
         run: |
+          set -euo pipefail
           python - <<'PY'
           import pathlib, py_compile
-          files = sorted(pathlib.Path('.').glob('*.py'))
+          files = sorted(pathlib.Path('.').rglob('*.py'))
+          files = [p for p in files if '.buildozer' not in p.parts and '.git' not in p.parts]
+          assert files, "No Python source files found."
           print('Python files:', [str(p) for p in files])
           for path in files:
               py_compile.compile(str(path), doraise=True)
@@ -71,28 +95,39 @@ jobs:
       - name: Run planner and ATC regression tests
         run: python tests/test_core.py
 
-      - name: Generate app icon
-        run: python make_icon.py
+      - name: Generate and validate app icon
+        run: |
+          set -euo pipefail
+          python make_icon.py
+          test -s icon.png
+          file icon.png
+          python - <<'PY'
+          from PIL import Image
+          im = Image.open("icon.png")
+          im.verify()
+          print("Icon image verified:", im.format, im.size)
+          PY
 
-      - name: Build debug APK
+      - name: Build debug APKs for device and emulator
         env:
           BUILDOZER_WARN_ON_ROOT: "0"
           PIP_NO_INPUT: "1"
         run: |
           set -o pipefail
           rm -rf .buildozer bin build.log
-          # Produce the shipping ARM64 APK and an x86_64 twin for an emulator launch test.
           python - <<'PY'
           from pathlib import Path
-          path = Path("buildozer.spec")
-          text = path.read_text(encoding="utf-8")
-          lines = text.splitlines()
+          p = Path("buildozer.spec")
+          text = p.read_text(encoding="utf-8")
           old = "android.archs = arm64-v8a"
           new = "android.archs = arm64-v8a,x86_64"
-          assert lines.count(old) == 1, "Expected exactly one ARM64 architecture setting"
-          path.write_text("\n".join(new if line == old else line for line in lines) + "\n", encoding="utf-8")
-          assert new in path.read_text(encoding="utf-8").splitlines()
+          if old not in text:
+              raise SystemExit("Expected android.archs = arm64-v8a in buildozer.spec")
+          text = text.replace(old, new, 1)
+          p.write_text(text, encoding="utf-8")
+          print("Configured ARM64 shipping APK plus x86_64 emulator-test APK.")
           PY
+          grep -q '^android.archs = arm64-v8a,x86_64$' buildozer.spec
           buildozer -v --debug android debug 2>&1 | tee build.log
 
       - name: Diagnose generated packages
@@ -103,27 +138,29 @@ jobs:
           echo "--- bin directory ---"
           ls -la bin 2>/dev/null || true
           echo "--- Buildozer tail ---"
-          tail -n 120 build.log 2>/dev/null || true
+          tail -n 160 build.log 2>/dev/null || true
 
-      - name: Verify APK archive and package metadata
+      - name: Verify APK archives and package metadata
         run: |
           set -euo pipefail
           ARM64_APK="$(find bin -type f -name '*arm64-v8a-debug.apk' -print -quit)"
           X86_APK="$(find bin -type f -name '*x86_64-debug.apk' -print -quit)"
           if [ -z "$ARM64_APK" ] || [ -z "$X86_APK" ]; then
-            echo "ERROR: Both ARM64 release APK and x86_64 emulator-test APK are required."
+            echo "ERROR: Both ARM64 shipping APK and x86_64 emulator-test APK are required."
             find . -type f -name '*.apk' -print -exec ls -lh {} \;
             exit 1
           fi
           for APK in "$ARM64_APK" "$X86_APK"; do
             echo "Checking $APK"
-            ls -lh "$APK"
+            test -s "$APK"
             unzip -t "$APK" >/dev/null
-            if command -v aapt >/dev/null 2>&1; then
-              aapt dump badging "$APK" | grep -E "^package:|^launchable-activity:"
+            unzip -l "$APK" | grep -E 'AndroidManifest.xml|classes.dex' >/dev/null
+            if [ -x "$ANDROID_HOME/build-tools/34.0.0/aapt" ]; then
+              "$ANDROID_HOME/build-tools/34.0.0/aapt" dump badging "$APK" | grep -E '^package:|^launchable-activity:'
             fi
+            sha256sum "$APK"
           done
-          echo "Both APK archives passed integrity checks."
+          echo "APK archive and payload checks passed."
 
       - name: Boot x86_64 Android emulator and verify app startup
         uses: reactivecircus/android-emulator-runner@v2
@@ -141,15 +178,15 @@ jobs:
             APK="$(find bin -type f -name '*x86_64-debug.apk' -print -quit)"
             test -n "$APK"
             PACKAGE="org.aeroflycompanion.aeroflyatc"
-            echo "Installing x86_64 test APK: $APK"
+            echo "Installing emulator-test APK: $APK"
             adb install -r "$APK"
             adb shell pm path "$PACKAGE"
             adb logcat -c
             adb shell monkey -p "$PACKAGE" -c android.intent.category.LAUNCHER 1 2>&1 | tee monkey-launch.log
             sleep 30
             adb logcat -d -v threadtime > startup-logcat.txt
-            if grep -E "FATAL EXCEPTION|Fatal signal [0-9]+|ANR in $PACKAGE|Process: $PACKAGE" startup-logcat.txt; then
-              echo "ERROR: Android reported an app crash or ANR during startup."
+            if grep -E "FATAL EXCEPTION|Fatal signal [0-9]+|ANR in $PACKAGE|Process: $PACKAGE|Python for android ended" startup-logcat.txt; then
+              echo "ERROR: Android reported a crash, fatal signal, ANR, or Python runtime termination."
               exit 1
             fi
             PID="$(adb shell pidof "$PACKAGE" | tr -d '\r')"
@@ -162,9 +199,9 @@ jobs:
               echo "ERROR: Android could not find a launchable activity."
               exit 1
             fi
-            echo "Startup smoke test passed; app process PID=$PID"
+            echo "Startup smoke test passed; process PID=$PID stayed alive for 30 seconds."
 
-      - name: Upload startup diagnostics on failure
+      - name: Upload failure diagnostics
         if: failure()
         uses: actions/upload-artifact@v4
         with:
@@ -176,12 +213,12 @@ jobs:
           if-no-files-found: ignore
           retention-days: 3
 
-      - name: Reclaim Actions artifact quota
+      - name: Reclaim previous APK artifacts after all checks pass
         if: success()
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          set -e
+          set -euo pipefail
           gh api --paginate "/repos/${GITHUB_REPOSITORY}/actions/artifacts?per_page=100" --jq '.artifacts[] | select(.expired == false and .name == "aerofly-atc-debug-apk") | .id' |
             while read -r id; do
               [ -z "$id" ] || gh api --method DELETE "/repos/${GITHUB_REPOSITORY}/actions/artifacts/$id"
@@ -204,107 +241,5 @@ jobs:
           set -euo pipefail
           APK="$(find bin -type f -name '*arm64-v8a-debug.apk' -print -quit)"
           TAG="build-${GITHUB_RUN_NUMBER}-${GITHUB_SHA::7}"
-          gh release create "$TAG" --repo "${GITHUB_REPOSITORY}" --title "Aerofly ATC APK build ${GITHUB_RUN_NUMBER}" --notes "Automated debug APK build from commit ${GITHUB_SHA}."
-          gh release upload "$TAG" "$APK" --repo "${GITHUB_REPOSITORY}" --clobber
- buildozer.spec
-          buildozer -v --debug android debug 2>&1 | tee build.log
-
-      - name: Diagnose generated packages
-        if: always()
-        run: |
-          echo "--- workspace packages ---"
-          find . -type f \( -name '*.apk' -o -name '*.aab' -o -name '*.apks' \) -print -exec ls -lh {} \; || true
-          echo "--- bin directory ---"
-          ls -la bin 2>/dev/null || true
-          echo "--- Buildozer tail ---"
-          tail -n 120 build.log 2>/dev/null || true
-
-      - name: Verify APK archive and package metadata
-        run: |
-          set -euo pipefail
-          APK="$(find bin -type f -name '*arm64-v8a-debug.apk' -print -quit)"
-          if [ -z "$APK" ]; then
-            echo "ERROR: Buildozer did not produce the expected ARM64 APK."
-            find . -type f -name '*.apk' -print
-            exit 1
-          fi
-          echo "APK=$APK"
-          ls -lh "$APK"
-          unzip -t "$APK" >/dev/null
-          if command -v aapt >/dev/null 2>&1; then
-            aapt dump badging "$APK" | grep -E "^package:|^launchable-activity:"
-          fi
-          echo "APK archive and package checks passed."
-
-      - name: Boot Android emulator and verify app startup
-        uses: reactivecircus/android-emulator-runner@v2
-        with:
-          api-level: 34
-          target: google_apis
-          arch: arm64-v8a
-          profile: pixel_2
-          emulator-options: -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect
-          disable-animations: true
-          script: |
-            set -euo pipefail
-            APK="$(find bin -type f -name '*arm64-v8a-debug.apk' -print -quit)"
-            test -n "$APK"
-            PACKAGE="org.aeroflycompanion.aeroflyatc"
-            echo "Installing $APK on Android API 34 ARM64 emulator"
-            adb install "$APK"
-            adb shell pm path "$PACKAGE"
-            adb logcat -c
-            adb shell monkey -p "$PACKAGE" -c android.intent.category.LAUNCHER 1
-            sleep 25
-            adb logcat -d -v brief > startup-logcat.txt
-            if grep -E "FATAL EXCEPTION|Fatal signal [0-9]+|ANR in $PACKAGE|Process: $PACKAGE" startup-logcat.txt; then
-              echo "ERROR: Android reported an app crash or ANR during startup."
-              exit 1
-            fi
-            PID="$(adb shell pidof "$PACKAGE" | tr -d '\r')"
-            if [ -z "$PID" ]; then
-              echo "ERROR: App process is not running after launch."
-              tail -n 200 startup-logcat.txt
-              exit 1
-            fi
-            echo "Startup smoke test passed; app process PID=$PID"
-
-      - name: Upload startup diagnostics on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: aerofly-atc-startup-failure-log
-          path: startup-logcat.txt
-          if-no-files-found: ignore
-          retention-days: 3
-
-      - name: Reclaim Actions artifact quota
-        if: success()
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -e
-          gh api --paginate "/repos/${GITHUB_REPOSITORY}/actions/artifacts?per_page=100" --jq '.artifacts[] | select(.expired == false) | .id' |
-            while read -r id; do
-              [ -z "$id" ] || gh api --method DELETE "/repos/${GITHUB_REPOSITORY}/actions/artifacts/$id"
-            done
-
-      - name: Upload APK artifact
-        if: success()
-        uses: actions/upload-artifact@v4
-        with:
-          name: aerofly-atc-debug-apk
-          path: 'bin/*arm64-v8a-debug.apk'
-          if-no-files-found: error
-          retention-days: 7
-
-      - name: Publish APK release
-        if: success()
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          APK="$(find bin -type f -name '*arm64-v8a-debug.apk' -print -quit)"
-          TAG="build-${GITHUB_RUN_NUMBER}-${GITHUB_SHA::7}"
-          gh release create "$TAG" --repo "${GITHUB_REPOSITORY}" --title "Aerofly ATC APK build ${GITHUB_RUN_NUMBER}" --notes "Automated debug APK build from commit ${GITHUB_SHA}."
+          gh release create "$TAG" --repo "${GITHUB_REPOSITORY}" --title "Aerofly ATC APK build ${GITHUB_RUN_NUMBER}" --notes "Automated debug APK build from commit ${GITHUB_SHA} after emulator startup verification."
           gh release upload "$TAG" "$APK" --repo "${GITHUB_REPOSITORY}" --clobber
