@@ -95,6 +95,7 @@ jobs:
 
       - name: Verify APK
         run: |
+          set -e
           APK="$(find . -type f -name '*.apk' -print -quit)"
           if [ -z "$APK" ]; then
             echo "ERROR: Buildozer produced no APK."
@@ -102,6 +103,50 @@ jobs:
           fi
           echo "APK=$APK"
           ls -lh "$APK"
+          command -v aapt >/dev/null 2>&1 && aapt dump badging "$APK" | grep -E "^package:|^launchable-activity:" || true
+          unzip -t "$APK" >/dev/null
+          echo "APK archive integrity passed."
+
+      - name: Boot Android emulator and verify app startup
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          target: google_apis
+          arch: arm64-v8a
+          profile: pixel_2
+          emulator-options: -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect
+          disable-animations: true
+          script: |
+            set -euo pipefail
+            APK="$(find . -type f -name '*.apk' -print -quit)"
+            test -n "$APK"
+            PACKAGE="org.aeroflycompanion.aeroflyatc"
+            echo "Installing $APK on Android API 34 ARM64 emulator"
+            adb install "$APK"
+            adb shell pm path "$PACKAGE"
+            adb logcat -c
+            adb shell monkey -p "$PACKAGE" -c android.intent.category.LAUNCHER 1
+            sleep 25
+            adb logcat -d -v brief > startup-logcat.txt
+            if grep -E "FATAL EXCEPTION|Fatal signal [0-9]+|ANR in $PACKAGE|Process: $PACKAGE" startup-logcat.txt; then
+              echo "ERROR: Android reported an app crash or ANR during startup."
+              exit 1
+            fi
+            PID="$(adb shell pidof "$PACKAGE" | tr -d '\r')"
+            if [ -z "$PID" ]; then
+              echo "ERROR: App process is not running after launch."
+              tail -n 200 startup-logcat.txt
+              exit 1
+            fi
+            echo "Startup smoke test passed; app process PID=$PID"
+      - name: Upload startup diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aerofly-atc-startup-failure-log
+          path: startup-logcat.txt
+          if-no-files-found: ignore
+          retention-days: 3
 
       - name: Reclaim Actions artifact quota
         if: success()
