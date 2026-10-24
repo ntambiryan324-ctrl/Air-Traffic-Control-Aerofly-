@@ -81,9 +81,7 @@ jobs:
         run: |
           set -o pipefail
           rm -rf .buildozer bin build.log
-          # Build the user's ARM64 APK plus an x86_64 APK for a real emulator launch test.
-          sed -i 's/^android.archs = arm64-v8a$/android.archs = arm64-v8a,x86_64/' buildozer.spec
-          grep -q '^android.archs = arm64-v8a,x86_64
+          buildozer -v --debug android debug 2>&1 | tee build.log
 
       - name: Diagnose generated packages
         if: always()
@@ -95,19 +93,22 @@ jobs:
           echo "--- Buildozer tail ---"
           tail -n 120 build.log 2>/dev/null || true
 
-      - name: Verify APK
+      - name: Verify APK archive and package metadata
         run: |
-          set -e
-          APK="$(find . -type f -name '*.apk' -print -quit)"
+          set -euo pipefail
+          APK="$(find bin -type f -name '*arm64-v8a-debug.apk' -print -quit)"
           if [ -z "$APK" ]; then
-            echo "ERROR: Buildozer produced no APK."
+            echo "ERROR: Buildozer did not produce the expected ARM64 APK."
+            find . -type f -name '*.apk' -print
             exit 1
           fi
           echo "APK=$APK"
           ls -lh "$APK"
-          command -v aapt >/dev/null 2>&1 && aapt dump badging "$APK" | grep -E "^package:|^launchable-activity:" || true
           unzip -t "$APK" >/dev/null
-          echo "APK archive integrity passed."
+          if command -v aapt >/dev/null 2>&1; then
+            aapt dump badging "$APK" | grep -E "^package:|^launchable-activity:"
+          fi
+          echo "APK archive and package checks passed."
 
       - name: Boot Android emulator and verify app startup
         uses: reactivecircus/android-emulator-runner@v2
@@ -120,7 +121,7 @@ jobs:
           disable-animations: true
           script: |
             set -euo pipefail
-            APK="$(find . -type f -name '*.apk' -print -quit)"
+            APK="$(find bin -type f -name '*arm64-v8a-debug.apk' -print -quit)"
             test -n "$APK"
             PACKAGE="org.aeroflycompanion.aeroflyatc"
             echo "Installing $APK on Android API 34 ARM64 emulator"
@@ -141,7 +142,8 @@ jobs:
               exit 1
             fi
             echo "Startup smoke test passed; app process PID=$PID"
-      - name: Upload startup diagnostics
+
+      - name: Upload startup diagnostics on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
@@ -149,39 +151,6 @@ jobs:
           path: startup-logcat.txt
           if-no-files-found: ignore
           retention-days: 3
-
-      - name: Verify APK launches on Android emulator
-        uses: reactivecircus/android-emulator-runner@v2
-        with:
-          api-level: 34
-          arch: x86_64
-          profile: pixel_2
-          emulator-options: -no-window -no-audio -no-boot-anim
-          disable-animations: true
-          script: |
-            set -euo pipefail
-            APK="$(find bin -type f -name '*x86_64*debug.apk' -print -quit)"
-            if [ -z "$APK" ]; then
-              echo "ERROR: x86_64 APK required for startup test was not produced."
-              find bin -type f -name '*.apk' -print
-              exit 1
-            fi
-            PKG="org.aeroflycompanion.aeroflyatc"
-            adb install -r "$APK"
-            adb logcat -c
-            adb shell monkey -p "$PKG" -c android.intent.category.LAUNCHER 1
-            sleep 25
-            if ! adb shell pidof "$PKG" >/dev/null; then
-              echo "ERROR: app process exited after launch."
-              adb logcat -d -t 500
-              exit 1
-            fi
-            if adb logcat -d -s AndroidRuntime:E | grep -E 'FATAL EXCEPTION|Process: org\\.aeroflycompanion\\.aeroflyatc'; then
-              echo "ERROR: Android reported a fatal runtime exception."
-              exit 1
-            fi
-            adb shell dumpsys activity activities | grep -E 'mResumedActivity|topResumedActivity' | grep -F "$PKG"
-            echo "APK installed and remained running on Android emulator."
 
       - name: Reclaim Actions artifact quota
         if: success()
@@ -208,106 +177,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          set -e
-          APK="$(find . -type f -name '*.apk' -print -quit)"
-          TAG="build-${GITHUB_RUN_NUMBER}-${GITHUB_SHA::7}"
-          gh release create "$TAG" --repo "${GITHUB_REPOSITORY}" --title "Aerofly ATC APK build ${GITHUB_RUN_NUMBER}" --notes "Automated debug APK build from commit ${GITHUB_SHA}."
-          gh release upload "$TAG" "$APK" --repo "${GITHUB_REPOSITORY}" --clobber
- buildozer.spec
-          buildozer -v --debug android debug 2>&1 | tee build.log
-
-      - name: Diagnose generated packages
-        if: always()
-        run: |
-          echo "--- workspace packages ---"
-          find . -type f \( -name '*.apk' -o -name '*.aab' -o -name '*.apks' \) -print -exec ls -lh {} \; || true
-          echo "--- bin directory ---"
-          ls -la bin 2>/dev/null || true
-          echo "--- Buildozer tail ---"
-          tail -n 120 build.log 2>/dev/null || true
-
-      - name: Verify APK
-        run: |
-          set -e
-          APK="$(find . -type f -name '*.apk' -print -quit)"
-          if [ -z "$APK" ]; then
-            echo "ERROR: Buildozer produced no APK."
-            exit 1
-          fi
-          echo "APK=$APK"
-          ls -lh "$APK"
-          command -v aapt >/dev/null 2>&1 && aapt dump badging "$APK" | grep -E "^package:|^launchable-activity:" || true
-          unzip -t "$APK" >/dev/null
-          echo "APK archive integrity passed."
-
-      - name: Boot Android emulator and verify app startup
-        uses: reactivecircus/android-emulator-runner@v2
-        with:
-          api-level: 34
-          target: google_apis
-          arch: arm64-v8a
-          profile: pixel_2
-          emulator-options: -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect
-          disable-animations: true
-          script: |
-            set -euo pipefail
-            APK="$(find . -type f -name '*.apk' -print -quit)"
-            test -n "$APK"
-            PACKAGE="org.aeroflycompanion.aeroflyatc"
-            echo "Installing $APK on Android API 34 ARM64 emulator"
-            adb install "$APK"
-            adb shell pm path "$PACKAGE"
-            adb logcat -c
-            adb shell monkey -p "$PACKAGE" -c android.intent.category.LAUNCHER 1
-            sleep 25
-            adb logcat -d -v brief > startup-logcat.txt
-            if grep -E "FATAL EXCEPTION|Fatal signal [0-9]+|ANR in $PACKAGE|Process: $PACKAGE" startup-logcat.txt; then
-              echo "ERROR: Android reported an app crash or ANR during startup."
-              exit 1
-            fi
-            PID="$(adb shell pidof "$PACKAGE" | tr -d '\r')"
-            if [ -z "$PID" ]; then
-              echo "ERROR: App process is not running after launch."
-              tail -n 200 startup-logcat.txt
-              exit 1
-            fi
-            echo "Startup smoke test passed; app process PID=$PID"
-      - name: Upload startup diagnostics
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: aerofly-atc-startup-failure-log
-          path: startup-logcat.txt
-          if-no-files-found: ignore
-          retention-days: 3
-
-      - name: Reclaim Actions artifact quota
-        if: success()
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -e
-          gh api --paginate "/repos/${GITHUB_REPOSITORY}/actions/artifacts?per_page=100" --jq '.artifacts[] | select(.expired == false) | .id' |
-            while read -r id; do
-              [ -z "$id" ] || gh api --method DELETE "/repos/${GITHUB_REPOSITORY}/actions/artifacts/$id"
-            done
-
-      - name: Upload APK artifact
-        if: success()
-        uses: actions/upload-artifact@v4
-        with:
-          name: aerofly-atc-debug-apk
-          path: '**/*.apk'
-          if-no-files-found: error
-          retention-days: 7
-
-      - name: Publish APK release
-        if: success()
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -e
-          APK="$(find . -type f -name '*.apk' -print -quit)"
+          set -euo pipefail
+          APK="$(find bin -type f -name '*arm64-v8a-debug.apk' -print -quit)"
           TAG="build-${GITHUB_RUN_NUMBER}-${GITHUB_SHA::7}"
           gh release create "$TAG" --repo "${GITHUB_REPOSITORY}" --title "Aerofly ATC APK build ${GITHUB_RUN_NUMBER}" --notes "Automated debug APK build from commit ${GITHUB_SHA}."
           gh release upload "$TAG" "$APK" --repo "${GITHUB_REPOSITORY}" --clobber
