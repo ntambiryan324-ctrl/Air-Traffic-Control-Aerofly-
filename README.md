@@ -22,7 +22,7 @@ Two methods, both listed on the LINK tab:
 If Aerofly runs on the same device, use split-screen or a floating window so Android keeps this app's network alive.
 
 ## Files
-`main.py` UI and telemetry, `planner_core.py` planning and weather, `atc_engine.py` ATC rules, `extras.py` logbook/checklists/flight events,
+`main.py` UI/map, `telemetry.py` simulator networking and XGPS/XATT parsing, `planner_core.py` planning and weather, `atc_engine.py` ATC rules, `extras.py` logbook/checklists/flight events,
 `voice.py` Android speech (guarded), `icon.png` app icon, `tests/test_core.py` run with `python tests/test_core.py`.
 
 ## Build

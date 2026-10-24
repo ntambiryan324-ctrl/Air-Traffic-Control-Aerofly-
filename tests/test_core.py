@@ -3,7 +3,7 @@ import os, sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import planner_core as pc
 from atc_engine import ATCEngine, normalize, contains_token
-from main import Telemetry
+from telemetry import Telemetry
 
 def test_distance():
     d = pc.distance_nm(40.6398, -73.7789, 51.4700, -0.4543)  # JFK-LHR
