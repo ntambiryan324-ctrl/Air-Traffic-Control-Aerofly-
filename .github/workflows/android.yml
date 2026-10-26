@@ -149,23 +149,20 @@ jobs:
       - name: Verify APK archives and package metadata
         run: |
           set -euo pipefail
-          ARM64_APK="$(find bin -type f -name '*arm64-v8a-debug.apk' -print -quit)"
-          X86_APK="$(find bin -type f -name '*x86_64-debug.apk' -print -quit)"
-          if [ -z "$ARM64_APK" ] || [ -z "$X86_APK" ]; then
-            echo "ERROR: Both ARM64 shipping APK and x86_64 emulator-test APK are required."
+          APK="$(find bin -type f -name '*debug.apk' -print -quit)"
+          if [ -z "$APK" ]; then
+            echo "ERROR: Expected combined-ABI APK for device install and emulator startup test was not produced."
             find . -type f -name '*.apk' -print -exec ls -lh {} \;
             exit 1
           fi
-          for APK in "$ARM64_APK" "$X86_APK"; do
-            echo "Checking $APK"
-            test -s "$APK"
-            unzip -t "$APK" >/dev/null
-            unzip -l "$APK" | grep -E 'AndroidManifest.xml|classes.dex' >/dev/null
-            if [ -x "$ANDROID_HOME/build-tools/34.0.0/aapt" ]; then
-              "$ANDROID_HOME/build-tools/34.0.0/aapt" dump badging "$APK" | grep -E '^package:|^launchable-activity:'
-            fi
-            sha256sum "$APK"
-          done
+          echo "Checking $APK"
+          test -s "$APK"
+          unzip -t "$APK" >/dev/null
+          unzip -l "$APK" | grep -E 'AndroidManifest.xml|classes.dex' >/dev/null
+          if [ -x "$ANDROID_HOME/build-tools/34.0.0/aapt" ]; then
+            "$ANDROID_HOME/build-tools/34.0.0/aapt" dump badging "$APK" | grep -E '^package:|^launchable-activity:'
+          fi
+          sha256sum "$APK"
           echo "APK archive and payload checks passed."
 
       - name: Boot x86_64 Android emulator and verify app startup
@@ -181,7 +178,7 @@ jobs:
           script: |
             set -euo pipefail
             trap 'adb logcat -d -v threadtime > startup-logcat.txt 2>/dev/null || true' EXIT
-            APK="$(find bin -type f -name '*x86_64-debug.apk' -print -quit)"
+            APK="$(find bin -type f -name '*debug.apk' -print -quit)"
             test -n "$APK"
             PACKAGE="org.aeroflycompanion.aeroflyatc"
             echo "Installing emulator-test APK: $APK"
@@ -235,7 +232,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: aerofly-atc-debug-apk
-          path: 'bin/*arm64-v8a-debug.apk'
+          path: 'bin/*debug.apk'
           if-no-files-found: error
           retention-days: 7
 
@@ -245,7 +242,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          APK="$(find bin -type f -name '*arm64-v8a-debug.apk' -print -quit)"
+          APK="$(find bin -type f -name '*debug.apk' -print -quit)"
           TAG="build-${GITHUB_RUN_NUMBER}-${GITHUB_SHA::7}"
           gh release create "$TAG" --repo "${GITHUB_REPOSITORY}" --title "Aerofly ATC APK build ${GITHUB_RUN_NUMBER}" --notes "Automated debug APK build from commit ${GITHUB_SHA} after emulator startup verification."
           gh release upload "$TAG" "$APK" --repo "${GITHUB_REPOSITORY}" --clobber
