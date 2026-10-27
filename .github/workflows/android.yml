@@ -1,0 +1,248 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  build:
+    name: Build AeroflyATC
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Python 3.11.9
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11.9"
+
+      - name: Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Android build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git zip unzip build-essential ccache autoconf automake autopoint gettext libtool libtool-bin pkg-config zlib1g-dev libncurses5-dev libncursesw5-dev libtinfo5 cmake libffi-dev libssl-dev
+
+      - name: Install known-good Buildozer toolchain
+        run: |
+          python -m pip install "pip==24.3.1"
+          python -m pip install "buildozer==1.5.0" "cython==0.29.34" "setuptools<81" wheel virtualenv "kivy==2.3.1" pillow
+          python -m pip --version
+          buildozer --version
+          python -c "import Cython; print('Cython', Cython.__version__)"
+
+      - name: Validate Android build configuration
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import configparser
+          spec = configparser.ConfigParser(interpolation=None)
+          assert spec.read("buildozer.spec"), "buildozer.spec missing"
+          app = spec["app"]
+          assert app.get("title"), "app.title missing"
+          assert app.get("package.name"), "app package.name missing"
+          assert app.get("package.domain"), "app package.domain missing"
+          assert app.get("android.api"), "android.api missing"
+          assert app.get("android.minapi"), "android.minapi missing"
+          assert "kivy" in app.get("requirements", "").lower(), "Kivy requirement missing"
+          assert Path("main.py").is_file(), "main.py missing"
+          assert Path("make_icon.py").is_file(), "make_icon.py missing"
+          assert Path("tests/test_core.py").is_file(), "regression tests missing"
+          print("Build configuration and required files passed.")
+          PY
+
+      - name: Runtime startup structure smoke test
+        run: |
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+          tree = ast.parse(Path("main.py").read_text(encoding="utf-8"))
+          classes = {n.name: n for n in tree.body if isinstance(n, ast.ClassDef)}
+          assert "AeroflyATCApp" in classes, "AeroflyATCApp class missing"
+          app = classes["AeroflyATCApp"]
+          bases = [b.id for b in app.bases if isinstance(b, ast.Name)]
+          assert "App" in bases, f"AeroflyATCApp must inherit App, got {bases}"
+          assert any(isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == "build" for n in app.body), "build() missing"
+          compile(Path("main.py").read_text(encoding="utf-8"), "main.py", "exec")
+          print("Startup structure smoke test passed.")
+          PY
+
+      - name: Validate every Python source file
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import pathlib, py_compile
+          files = sorted(pathlib.Path('.').rglob('*.py'))
+          files = [p for p in files if '.buildozer' not in p.parts and '.git' not in p.parts]
+          assert files, "No Python source files found."
+          print('Python files:', [str(p) for p in files])
+          for path in files:
+              py_compile.compile(str(path), doraise=True)
+          print('All Python sources compile successfully.')
+          PY
+
+      - name: Run planner and ATC regression tests
+        run: python tests/test_core.py
+
+      - name: Generate and validate app icon
+        run: |
+          set -euo pipefail
+          python make_icon.py
+          test -s icon.png
+          file icon.png
+          python - <<'PY'
+          from pathlib import Path
+          data = Path("icon.png").read_bytes()
+          assert data[:8] == bytes.fromhex("89504e470d0a1a0a"), "icon.png is not a PNG"
+          assert len(data) >= 24, "icon.png is truncated"
+          width = int.from_bytes(data[16:20], "big")
+          height = int.from_bytes(data[20:24], "big")
+          assert width >= 128 and height >= 128, f"Icon size too small: {width}x{height}"
+          print(f"PNG icon verified: {width}x{height}, {len(data)} bytes")
+          PY
+
+      - name: Build debug APKs for device and emulator
+        env:
+          BUILDOZER_WARN_ON_ROOT: "0"
+          PIP_NO_INPUT: "1"
+        run: |
+          set -euo pipefail
+          rm -rf .buildozer bin build.log
+          # python-for-android currently imports pip's internal open_rich_spinner,
+          # which was removed in newer pip releases. Pin the toolchain's pip and
+          # propagate a constraint into the isolated python-for-android venv.
+          printf '%s\n' 'pip==24.3.1' > ci-constraints.txt
+          export PIP_CONSTRAINT="$GITHUB_WORKSPACE/ci-constraints.txt"
+          export PIP_NO_INPUT=1
+          # buildozer.spec must permanently include the ARM64 device ABI and
+          # x86_64 emulator ABI. Do not rewrite it here: that duplicated the
+          # architecture when the spec was already correctly configured.
+          grep -q '^android.archs = arm64-v8a,x86_64$' buildozer.spec || {
+            echo "ERROR: buildozer.spec must declare android.archs = arm64-v8a,x86_64"
+            grep '^android.archs' buildozer.spec || true
+            exit 1
+          }
+          buildozer -v --debug android debug 2>&1 | tee build.log
+
+      - name: Diagnose generated packages
+        if: always()
+        run: |
+          echo "--- workspace packages ---"
+          find . -type f \( -name '*.apk' -o -name '*.aab' -o -name '*.apks' \) -print -exec ls -lh {} \; || true
+          echo "--- bin directory ---"
+          ls -la bin 2>/dev/null || true
+          echo "--- Buildozer tail ---"
+          tail -n 160 build.log 2>/dev/null || true
+
+      - name: Verify APK archives and package metadata
+        run: |
+          set -euo pipefail
+          APK="$(find bin -type f -name '*debug.apk' -print -quit)"
+          if [ -z "$APK" ]; then
+            echo "ERROR: Expected combined-ABI APK for device install and emulator startup test was not produced."
+            find . -type f -name '*.apk' -print -exec ls -lh {} \;
+            exit 1
+          fi
+          echo "Checking $APK"
+          test -s "$APK"
+          unzip -t "$APK" >/dev/null
+          unzip -l "$APK" | grep -E 'AndroidManifest.xml|classes.dex' >/dev/null
+          if [ -x "$ANDROID_HOME/build-tools/34.0.0/aapt" ]; then
+            "$ANDROID_HOME/build-tools/34.0.0/aapt" dump badging "$APK" | grep -E '^package:|^launchable-activity:'
+          fi
+          sha256sum "$APK"
+          echo "APK archive and payload checks passed."
+
+      - name: Boot x86_64 Android emulator and verify app startup
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          target: google_apis
+          arch: x86_64
+          profile: pixel_2
+          emulator-options: -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect -no-snapshot-save
+          disable-animations: true
+          emulator-boot-timeout: 600
+          script: |
+            set -euo pipefail
+            trap 'adb logcat -d -v threadtime > startup-logcat.txt 2>/dev/null || true' EXIT
+            APK="$(find bin -type f -name '*debug.apk' -print -quit)"
+            test -n "$APK"
+            PACKAGE="org.aeroflycompanion.aeroflyatc"
+            echo "Installing emulator-test APK: $APK"
+            adb install -r "$APK"
+            adb shell pm path "$PACKAGE"
+            adb logcat -c
+            adb shell monkey -p "$PACKAGE" -c android.intent.category.LAUNCHER 1 2>&1 | tee monkey-launch.log
+            sleep 30
+            adb logcat -d -v threadtime > startup-logcat.txt
+            if grep -E "FATAL EXCEPTION|Fatal signal [0-9]+|ANR in $PACKAGE|Process: $PACKAGE|Python for android ended" startup-logcat.txt; then
+              echo "ERROR: Android reported a crash, fatal signal, ANR, or Python runtime termination."
+              exit 1
+            fi
+            PID="$(adb shell pidof "$PACKAGE" | tr -d '\r')"
+            if [ -z "$PID" ]; then
+              echo "ERROR: App process is not running 30 seconds after launch."
+              tail -n 200 startup-logcat.txt
+              exit 1
+            fi
+            if grep -q "No activities found" monkey-launch.log; then
+              echo "ERROR: Android could not find a launchable activity."
+              exit 1
+            fi
+            echo "Startup smoke test passed; process PID=$PID stayed alive for 30 seconds."
+
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aerofly-atc-failure-diagnostics
+          path: |
+            build.log
+            startup-logcat.txt
+            monkey-launch.log
+          if-no-files-found: ignore
+          retention-days: 3
+
+      - name: Reclaim previous APK artifacts after all checks pass
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api --paginate "/repos/${GITHUB_REPOSITORY}/actions/artifacts?per_page=100" --jq '.artifacts[] | select(.expired == false and .name == "aerofly-atc-debug-apk") | .id' |
+            while read -r id; do
+              [ -z "$id" ] || gh api --method DELETE "/repos/${GITHUB_REPOSITORY}/actions/artifacts/$id"
+            done
+
+      - name: Upload APK artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aerofly-atc-debug-apk
+          path: 'bin/*debug.apk'
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Publish APK release
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          APK="$(find bin -type f -name '*debug.apk' -print -quit)"
+          TAG="build-${GITHUB_RUN_NUMBER}-${GITHUB_SHA::7}"
+          gh release create "$TAG" --repo "${GITHUB_REPOSITORY}" --title "Aerofly ATC APK build ${GITHUB_RUN_NUMBER}" --notes "Automated debug APK build from commit ${GITHUB_SHA} after emulator startup verification."
+          gh release upload "$TAG" "$APK" --repo "${GITHUB_REPOSITORY}" --clobber

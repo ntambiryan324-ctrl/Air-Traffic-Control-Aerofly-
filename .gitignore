@@ -1,10 +1,31 @@
+# Node & Web
 node_modules/
-build/
 dist/
 coverage/
-.DS_Store
-*.log
 .playwright-cli/
 .aistudio/
-.env*
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+
+# Build outputs
+build/
+bin/
+*.egg-info/
+
+# Android/Buildozer
+.buildozer/
+
+# Local environment and secrets
+.env
+.env.*
 !.env.example
+*.log
+
+# IDEs & OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

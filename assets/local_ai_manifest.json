@@ -1,0 +1,8 @@
+{
+  "model_repo": "Qwen/Qwen2.5-1.5B-Instruct-GGUF",
+  "model_file": "qwen2.5-1.5b-instruct-q4_k_m.gguf",
+  "quantization": "Q4_K_M",
+  "license": "Apache-2.0",
+  "runtime": "llama.cpp",
+  "api_keys_required": false
+}
