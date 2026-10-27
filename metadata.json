@@ -1,0 +1,6 @@
+{
+  "name": "Aerofly Air Control",
+  "description": "Companion Electronic Flight Bag and Air Traffic Control system for Aerofly FS Global with live telemetry, radar map, route planner, and realistic ATC phraseology.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
