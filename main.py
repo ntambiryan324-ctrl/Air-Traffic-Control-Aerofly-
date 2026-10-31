@@ -1,4 +1,4 @@
-"""Aerofly ATC minimal telemetry + OSM test build. Kept deliberately dependency-light."""
+"""Aerofly ATC app entry point: telemetry, OSM map, and UI startup. Kept deliberately dependency-light."""
 import math
 import os
 import re
