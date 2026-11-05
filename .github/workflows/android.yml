@@ -176,7 +176,7 @@ jobs:
           disable-animations: true
           emulator-boot-timeout: 600
           script: |
-            set -euo pipefail
+            set -eu
             trap 'adb logcat -d -v threadtime > startup-logcat.txt 2>/dev/null || true' EXIT
             APK="$(find bin -type f -name '*debug.apk' -print -quit)"
             test -n "$APK"
