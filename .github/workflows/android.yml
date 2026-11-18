@@ -175,34 +175,7 @@ jobs:
           emulator-options: -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect -no-snapshot-save
           disable-animations: true
           emulator-boot-timeout: 600
-          script: |
-            set -eu
-            trap 'adb logcat -d -v threadtime > startup-logcat.txt 2>/dev/null || true' EXIT
-            APK="$(find bin -type f -name '*debug.apk' -print -quit)"
-            test -n "$APK"
-            PACKAGE="org.aeroflycompanion.aeroflyatc"
-            echo "Installing emulator-test APK: $APK"
-            adb install -r "$APK"
-            adb shell pm path "$PACKAGE"
-            adb logcat -c
-            adb shell monkey -p "$PACKAGE" -c android.intent.category.LAUNCHER 1 2>&1 | tee monkey-launch.log
-            sleep 30
-            adb logcat -d -v threadtime > startup-logcat.txt
-            if grep -E "FATAL EXCEPTION|Fatal signal [0-9]+|ANR in $PACKAGE|Process: $PACKAGE|Python for android ended" startup-logcat.txt; then
-              echo "ERROR: Android reported a crash, fatal signal, ANR, or Python runtime termination."
-              exit 1
-            fi
-            PID="$(adb shell pidof "$PACKAGE" | tr -d '\r')"
-            if [ -z "$PID" ]; then
-              echo "ERROR: App process is not running 30 seconds after launch."
-              tail -n 200 startup-logcat.txt
-              exit 1
-            fi
-            if grep -q "No activities found" monkey-launch.log; then
-              echo "ERROR: Android could not find a launchable activity."
-              exit 1
-            fi
-            echo "Startup smoke test passed; process PID=$PID stayed alive for 30 seconds."
+          script: bash ci/emulator_check.sh
 
       - name: Upload failure diagnostics
         if: failure()
@@ -248,11 +221,13 @@ jobs:
           gh release upload "$TAG" "$APK" --repo "${GITHUB_REPOSITORY}" --clobber
 
       - name: Update rolling latest release (APK)
-        if: success()
+        if: always() && github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          cp "$(find bin -type f -name '*debug.apk' -print -quit)" AeroflyATC.apk
+          APK="$(find bin -type f -name '*debug.apk' -print -quit)"
+          if [ -z "$APK" ]; then echo "No APK built; skipping release upload."; exit 0; fi
+          cp "$APK" AeroflyATC.apk
           gh release view latest --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || gh release create latest --repo "$GITHUB_REPOSITORY" --title "Latest builds" --notes "Rolling release: newest Android APK and Windows zip built from main." --latest=false || gh release view latest --repo "$GITHUB_REPOSITORY" >/dev/null
           gh release upload latest AeroflyATC.apk --repo "$GITHUB_REPOSITORY" --clobber

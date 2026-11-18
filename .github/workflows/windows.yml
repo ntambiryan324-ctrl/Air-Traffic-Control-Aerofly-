@@ -13,6 +13,8 @@ jobs:
     name: Build AeroflyATC for Windows
     runs-on: windows-latest
     timeout-minutes: 40
+    env:
+      KIVY_GL_BACKEND: angle_sdl2
     steps:
       - uses: actions/checkout@v4
 
@@ -29,6 +31,7 @@ jobs:
           python tests/test_suite_features.py
 
       - name: Build app
+        timeout-minutes: 15
         run: |
           python make_icon.py
           pyinstaller --noconfirm --windowed --name AeroflyATC --icon icon.png --add-data "assets;assets" --add-data "icon.png;." main.py
