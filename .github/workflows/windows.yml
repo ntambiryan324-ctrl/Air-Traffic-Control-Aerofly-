@@ -1,0 +1,48 @@
+name: Build Windows EXE
+
+on:
+  push:
+    branches: [main, "feature/**"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build AeroflyATC for Windows
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: python -m pip install "kivy[base]==2.3.1" pyinstaller pillow
+
+      - name: Tests
+        run: |
+          python tests/test_core.py
+          python tests/test_suite_features.py
+
+      - name: Build app
+        run: |
+          python make_icon.py
+          pyinstaller --noconfirm --windowed --name AeroflyATC --icon icon.png --add-data "assets;assets" --add-data "icon.png;." main.py
+
+      - name: Build SimBridge (MSFS / GeoFS / X-Plane)
+        continue-on-error: true
+        run: |
+          python -m pip install SimConnect
+          pyinstaller --noconfirm --onefile --name SimBridge --collect-all SimConnect bridge/simbridge.py
+
+      - name: Package
+        shell: pwsh
+        run: |
+          Copy-Item dist/SimBridge.exe dist/AeroflyATC/ -ErrorAction SilentlyContinue
+          Compress-Archive -Path dist/AeroflyATC/* -DestinationPath AeroflyATC-Windows.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AeroflyATC-Windows
+          path: AeroflyATC-Windows.zip
