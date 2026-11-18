@@ -902,6 +902,21 @@ class FlightPlanOverlay(FloatLayout):
         card.add_widget(share)
         self.body.add_widget(card)
 
+        brief = Card(orientation="vertical", size_hint_y=None, height=dp(176))
+        brief.add_widget(label("Briefing PDF and VATSIM prefile", 12, TEXT, True, halign="left"))
+        self.callsign_input = TextInput(text=getattr(self, "callsign", ""), hint_text="Callsign (e.g. UAE201)",
+                                        multiline=False, size_hint_y=None, height=dp(40),
+                                        background_normal="", background_color=PANEL2,
+                                        foreground_color=TEXT, hint_text_color=MUTED, padding=(dp(10), dp(9)))
+        brief.add_widget(self.callsign_input)
+        pdf_btn = self._btn("Create briefing PDF", True, 38)
+        pdf_btn.bind(on_release=self.export_pdf)
+        pre_btn = self._btn("Copy ICAO plan + open VATSIM prefile", False, 38)
+        pre_btn.bind(on_release=self.vatsim_prefile)
+        brief.add_widget(pdf_btn)
+        brief.add_widget(pre_btn)
+        self.body.add_widget(brief)
+
         integrations = Card(orientation="vertical", size_hint_y=None, height=dp(192))
         integrations.add_widget(label("SimBrief / Navigraph", 12, TEXT, True, halign="left"))
         self.simbrief_input = TextInput(text=self.simbrief_username, hint_text="SimBrief username (for importing an existing OFP)",
@@ -941,6 +956,42 @@ class FlightPlanOverlay(FloatLayout):
             self.status.color = GREEN
         except Exception as exc:
             self.export_status.text = "Export failed: " + str(exc)[:140]
+
+    def _callsign(self):
+        box = getattr(self, "callsign_input", None)
+        self.callsign = (box.text if box is not None else getattr(self, "callsign", "")).strip().upper()
+        return self.callsign
+
+    def export_pdf(self, *_):
+        try:
+            import briefing
+            p = self.plan
+            dest = os.path.join(App.get_running_app().user_data_dir, "AeroflyATC_briefing.pdf")
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            metars = {}
+            for code in (p.get("origin"), p.get("destination")):
+                try:
+                    metars[code] = pc.fetch_metar(code, timeout=4)
+                except Exception:
+                    metars[code] = ""
+            briefing.build_briefing_pdf(dest, p, self.route_points, pc.vertical_profile(p),
+                                        metars.get(p.get("origin"), ""), metars.get(p.get("destination"), ""),
+                                        callsign=self._callsign())
+            self.export_status.text = "Briefing PDF saved: " + dest
+            self.status.text = "Briefing PDF created."
+            self.status.color = GREEN
+        except Exception as exc:
+            self.export_status.text = "PDF failed: " + str(exc)[:140]
+
+    def vatsim_prefile(self, *_):
+        try:
+            import briefing
+            from kivy.core.clipboard import Clipboard
+            Clipboard.copy(briefing.icao_fpl(self.plan, self._callsign()))
+            self.export_status.text = "ICAO plan copied. Paste or re-enter the fields on the VATSIM page."
+            self.ui.open_url(briefing.VATSIM_PREFILE_URL)
+        except Exception as exc:
+            self.export_status.text = "Prefile failed: " + str(exc)[:140]
 
     def share_route(self, *_):
         route = self.plan.get("route", self.route_text)

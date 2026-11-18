@@ -27,3 +27,8 @@ If Aerofly runs on the same device, use split-screen or a floating window so And
 
 ## Build
 GitHub Actions builds an Android ARM64 debug APK with Buildozer, checks Python syntax and the app class, and attaches the APK to a release.
+
+## Flight-planner suite (in progress)
+- **Briefing PDF + VATSIM** (PLAN > Export): SimBrief-style PDF (route map, vertical profile, fuel, METAR, ICAO FPL) and a copy-and-open VATSIM prefile helper. Code: `briefing.py`.
+- **Windows build:** `.github/workflows/windows.yml` produces `AeroflyATC-Windows.zip` (app + `SimBridge.exe`) in the Actions artifacts.
+- **SimBridge** (`bridge/simbridge.py`, run on the PC): relays MSFS (SimConnect), GeoFS (browser bookmarklet) and X-Plane (ForeFlight-style announce) to the app as XGPS/XATT on UDP 49002. Aerofly connects directly (UDP 49002 / TCP 58585). Untested against the real simulators so far.
