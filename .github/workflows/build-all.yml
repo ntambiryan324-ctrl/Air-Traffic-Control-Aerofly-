@@ -1,0 +1,19 @@
+name: Build All (APK + Windows)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  android:
+    name: Android APK
+    uses: ./.github/workflows/android.yml
+
+  windows:
+    name: Windows EXE
+    uses: ./.github/workflows/windows.yml
