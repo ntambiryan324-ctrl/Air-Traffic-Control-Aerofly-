@@ -5,6 +5,9 @@ on:
     branches: [main, "feature/**"]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     name: Build AeroflyATC for Windows
@@ -46,3 +49,13 @@ jobs:
         with:
           name: AeroflyATC-Windows
           path: AeroflyATC-Windows.zip
+
+      - name: Update rolling latest release (Windows)
+        if: github.ref == 'refs/heads/main'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release view latest --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || gh release create latest --repo "$GITHUB_REPOSITORY" --title "Latest builds" --notes "Rolling release: newest Android APK and Windows zip built from main." --latest=false || gh release view latest --repo "$GITHUB_REPOSITORY" >/dev/null
+          gh release upload latest AeroflyATC-Windows.zip --repo "$GITHUB_REPOSITORY" --clobber

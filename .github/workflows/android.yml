@@ -246,3 +246,13 @@ jobs:
           TAG="build-${GITHUB_RUN_NUMBER}-${GITHUB_SHA::7}"
           gh release create "$TAG" --repo "${GITHUB_REPOSITORY}" --title "Aerofly ATC APK build ${GITHUB_RUN_NUMBER}" --notes "Automated debug APK build from commit ${GITHUB_SHA} after emulator startup verification."
           gh release upload "$TAG" "$APK" --repo "${GITHUB_REPOSITORY}" --clobber
+
+      - name: Update rolling latest release (APK)
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cp "$(find bin -type f -name '*debug.apk' -print -quit)" AeroflyATC.apk
+          gh release view latest --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || gh release create latest --repo "$GITHUB_REPOSITORY" --title "Latest builds" --notes "Rolling release: newest Android APK and Windows zip built from main." --latest=false || gh release view latest --repo "$GITHUB_REPOSITORY" >/dev/null
+          gh release upload latest AeroflyATC.apk --repo "$GITHUB_REPOSITORY" --clobber
