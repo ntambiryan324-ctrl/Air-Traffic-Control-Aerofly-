@@ -1195,11 +1195,11 @@ class ReferenceUI:
         self.root.add_widget(self.recenter)
 
         self.scale_label = label("500 nm", 9, MUTED, size_hint=(None, None),
-                                 size=(dp(80), dp(24)), pos_hint={"x": 0.04, "y": 0.04},
+                                 width=dp(80), height=dp(24), pos_hint={"x": 0.04, "y": 0.04},
                                  halign="center", valign="middle")
         self.root.add_widget(self.scale_label)
         self.attribution = label("OpenStreetMap © contributors", 8, MUTED,
-                                 size_hint=(None, None), size=(dp(160), dp(18)),
+                                 size_hint=(None, None), width=dp(160), height=dp(18),
                                  pos_hint={"x": 0.04, "y": 0.005}, halign="left")
         self.root.add_widget(self.attribution)
 

@@ -95,6 +95,13 @@ jobs:
       - name: Run planner and ATC regression tests
         run: python tests/test_core.py
 
+      - name: UI build smoke test (headless)
+        continue-on-error: true
+        run: |
+          python -m pip install "kivy[base]==2.3.1" pillow
+          sudo apt-get install -y xvfb libgl1-mesa-dri xsel > /dev/null
+          xvfb-run -a python tests/smoke_ui.py
+
       - name: Generate and validate app icon
         run: |
           set -euo pipefail
